@@ -2,7 +2,7 @@ name: Build Android APK (Optimized)
 
 on:
   push:
-    branches: [ development, main ]
+    branches: [ main ]
   workflow_dispatch:
 
 jobs:
@@ -49,18 +49,28 @@ jobs:
             -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m" \
             --no-daemon
 
+      - name: Sign APK with Signature Scheme v2/v3
+        run: |
+          BUILD_TOOLS_DIR=$(ls -d $ANDROID_HOME/build-tools/* | sort -V | tail -n 1)
+          APK_RAW=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          KEYSTORE="android/app/debug.keystore"
+          if [ ! -f "$KEYSTORE" ]; then
+            keytool -genkey -v -keystore "$KEYSTORE" -alias androiddebugkey -keyalg RSA -keysize 2048 -validity 10000 -storepass android -keypass android -dname "CN=Android Debug,O=Android,C=US"
+          fi
+          $BUILD_TOOLS_DIR/apksigner sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out android/app/build/outputs/apk/release/sentinal-authenticator-arm64.apk "$APK_RAW"
+          $BUILD_TOOLS_DIR/apksigner verify --verbose android/app/build/outputs/apk/release/sentinal-authenticator-arm64.apk
+
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: sentinal-authenticator-arm64-apk
-          path: android/app/build/outputs/apk/release/*.apk
+          path: android/app/build/outputs/apk/release/sentinal-authenticator-arm64.apk
           retention-days: 14
 
       - name: Register Build with Downloads Portal (/dw)
         if: success()
         run: |
           BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
-          RUN_URL="https://github.com/Sentinal-Security/mobile/actions/runs/${GITHUB_RUN_ID}"
           curl -s -X POST "https://backend-pi68.onrender.com/api/builds" \
             -H "Content-Type: application/json" \
             -d "{
@@ -69,6 +79,6 @@ jobs:
               \"type\": \"Android Release APK (arm64)\",
               \"branch\": \"${GITHUB_REF_NAME}\",
               \"commit\": \"${GITHUB_SHA}\",
-              \"downloadUrl\": \"${RUN_URL}\",
+              \"downloadUrl\": \"/builds/sentinal-authenticator-arm64.apk\",
               \"finishedAt\": \"${BUILD_TIME}\"
             }" || echo "Backend registration ping sent"
