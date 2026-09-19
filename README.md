@@ -1,56 +1,54 @@
-# Welcome to your Expo app 👋
+# Sentinal Security - Mobile Authenticator
 
-This is an [Expo](https://expo.dev) project created with [`create-expo-app`](https://www.npmjs.com/package/create-expo-app).
+Mobile client application designed to function as an authenticator tool (similar to Okta Verify or Duo Mobile). It serves as the physical possession factor in the system's Multi-Factor Authentication (MFA) workflow.
 
-## Get started
+## 1. Tech Stack
+* Platform: React Native (0.86.x)
+* Framework: Expo (SDK 57)
+* Routing: Expo Router (v57)
+* Language: TypeScript 6
+* State Management: React Hooks & Context
 
-1. Install dependencies
+## 2. System Role & Architecture
+In the Sentinal Security 3-component architecture, the mobile app serves as the secondary verification device:
+1. User submits username and password on the Next.js Web IAM Portal.
+2. The Spring Boot backend identifies that MFA is enabled on the account and generates an authentication challenge.
+3. The Mobile Authenticator app receives the challenge, allowing the user to approve the login attempt or provide a timed one-time password (TOTP).
+4. The backend confirms verification and unlocks the web session.
 
-   ```bash
-   npm install
-   ```
+## 3. Backend Integration
+The mobile client communicates directly with the centralized Spring Boot API gateway:
+* Production API Endpoint: `https://backend-pi68.onrender.com`
+* Local Development Override: Configure `EXPO_PUBLIC_API_URL` in `.env` to point to your machine's local IP (e.g., `http://192.168.x.x:8080`).
 
-2. Start the app
+## 4. Local Development
 
-   ```bash
-   npx expo start
-   ```
+### Prerequisites
+* Node.js 20+ installed
+* Expo Go app installed on physical iOS/Android device, or an active Android Studio / Xcode simulator
 
-In the output, you'll find options to open the app in a
-
-- [development build](https://docs.expo.dev/develop/development-builds/introduction/)
-- [Android emulator](https://docs.expo.dev/workflow/android-studio-emulator/)
-- [iOS simulator](https://docs.expo.dev/workflow/ios-simulator/)
-- [Expo Go](https://expo.dev/go), a limited sandbox for trying out app development with Expo
-
-You can start developing by editing the files inside the **app** directory. This project uses [file-based routing](https://docs.expo.dev/router/introduction).
-
-## Get a fresh project
-
-When you're ready, run:
-
+### Installation
 ```bash
-npm run reset-project
+npm install
 ```
 
-This command will move the starter code to the **app-example** directory and create a blank **app** directory where you can start developing.
+### Starting the Development Server
+```bash
+npx expo start
+```
+Scan the QR code displayed in the terminal with Expo Go (Android) or the default Camera app (iOS).
 
-### Other setup steps
+### Platform Commands
+```bash
+# Start directly on Android emulator
+npx expo start --android
 
-- To set up ESLint for linting, run `npx expo lint`, or follow our guide on ["Using ESLint and Prettier"](https://docs.expo.dev/guides/using-eslint/)
-- If you'd like to set up unit testing, follow our guide on ["Unit Testing with Jest"](https://docs.expo.dev/develop/unit-testing/)
-- Learn more about the TypeScript setup in this template in our guide on ["Using TypeScript"](https://docs.expo.dev/guides/typescript/)
+# Start directly on iOS simulator
+npx expo start --ios
 
-## Learn more
+# Start web preview
+npx expo start --web
 
-To learn more about developing your project with Expo, look at the following resources:
-
-- [Expo documentation](https://docs.expo.dev/): Learn fundamentals, or go into advanced topics with our [guides](https://docs.expo.dev/guides).
-- [Learn Expo tutorial](https://docs.expo.dev/tutorial/introduction/): Follow a step-by-step tutorial where you'll create a project that runs on Android, iOS, and the web.
-
-## Join the community
-
-Join our community of developers creating universal apps.
-
-- [Expo on GitHub](https://github.com/expo/expo): View our open source platform and contribute.
-- [Discord community](https://chat.expo.dev): Chat with Expo users and ask questions.
+# Type check
+npx tsc --noEmit
+```
