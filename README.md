@@ -97,8 +97,11 @@ The mobile repository includes an automated GitHub Actions pipeline (`.github/wo
 
 ### 6.2 Build Optimizations
 * **Single Architecture Compilation**: Restricts compilation to `arm64-v8a` (`-PreactNativeArchitectures=arm64-v8a`) specifically for modern devices (Samsung Galaxy S25 FE), reducing compile times by skipping obsolete 32-bit (`armeabi-v7a`) and x86 architectures.
-* **Gradle Worker Parallelization**: Leverages multi-core parallel execution (`--parallel --max-workers=4`) and allocates 4 GB JVM heap to avoid worker restarts.
+* **Gradle Worker & Task Parallelization**: Leverages multi-core parallel execution (`--parallel --max-workers=4`), Gradle build caching (`org.gradle.caching=true`), and allocates 4 GB JVM heap to prevent worker restarts.
+* **Native C++ CCache (`ccache-action`)**: Routes CMake and clang through `ccache` to cache compiled C++ translation units for `react-native-screens`, `react-native-reanimated`, and Hermes.
+* **Path Filtering (`paths-ignore`)**: Automatically skips build execution on commits that only touch markdown files (`**.md`), git configuration (`.git-town.toml`), or repository ignore files (`.gitignore`), conserving CI minutes.
 * **Bypassed Redundant Checks**: Skips slow release lint checks (`-x lint -x lintVitalRelease -x lintVitalAnalyzeRelease`).
+
 
 ### 6.3 APK Signature Scheme v2 & v3 (Android 15 Compatibility)
 * Modern Android (Android 11 through Android 15, Target SDK 36) strictly rejects unsigned APKs or APKs signed solely with legacy v1 (JAR signing), displaying *"There was a problem parsing the package"* or *"Can't install app"*.
