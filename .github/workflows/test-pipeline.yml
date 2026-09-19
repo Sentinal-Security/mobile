@@ -1,0 +1,55 @@
+name: Test Fast Pipeline (No Native Compile)
+
+on:
+  workflow_dispatch:
+  push:
+    paths:
+      - 'test-trigger.txt'
+
+jobs:
+  fast-test-build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Generate Dummy Test HTML Output
+        run: |
+          mkdir -p output
+          cat <<EOF > output/test-build-output.html
+          <!DOCTYPE html>
+          <html>
+          <head><title>Test Build</title></head>
+          <body style="font-family: sans-serif; padding: 2rem;">
+            <h1>Sentinal Authenticator - Fast Test Build</h1>
+            <p><strong>Generated on GitHub Actions</strong></p>
+            <p>Run ID: $GITHUB_RUN_ID</p>
+            <p>Commit: $GITHUB_SHA</p>
+            <p>Timestamp: $(date)</p>
+          </body>
+          </html>
+          EOF
+
+      - name: Upload Test Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: sentinal-mobile-test-artifact
+          path: output/test-build-output.html
+          retention-days: 14
+
+      - name: Register Build with Central Backend API
+        run: |
+          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          RUN_URL="https://github.com/Sentinal-Security/mobile/actions/runs/${GITHUB_RUN_ID}"
+          curl -s -X POST "https://backend-pi68.onrender.com/api/builds" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"password\": \"seanisbtter\",
+              \"name\": \"sentinal-mobile-test-build.html\",
+              \"type\": \"HTML Test Artifact\",
+              \"branch\": \"${GITHUB_REF_NAME}\",
+              \"commit\": \"${GITHUB_SHA}\",
+              \"downloadUrl\": \"${RUN_URL}\",
+              \"finishedAt\": \"${BUILD_TIME}\"
+            }" || echo "Backend registration ping sent"
