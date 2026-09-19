@@ -8,6 +8,7 @@ Mobile client application designed to function as an authenticator tool (similar
 * Routing: Expo Router (v57)
 * Language: TypeScript 6
 * State Management: React Hooks & Context
+* Target Architecture: Android 64-bit (`arm64-v8a` / Samsung Galaxy S25 FE and modern Android devices)
 
 ## 2. System Role & Architecture
 In the Sentinal Security 3-component architecture, the mobile app serves as the secondary verification device:
@@ -25,7 +26,7 @@ The mobile client communicates directly with the centralized Spring Boot API gat
 
 ### Prerequisites
 * Node.js 20+ installed
-* Expo Go app installed on physical iOS/Android device, or an active Android Studio / Xcode simulator
+* Android SDK (build-tools 34+ or 35+) or physical Android device / emulator
 
 ### Installation
 ```bash
@@ -55,14 +56,50 @@ npx expo start --web
 npx tsc --noEmit
 ```
 
-## 5. Automated Android APK Build Pipeline
-Every push to `development` or `main` triggers a GitHub Actions workflow (`.github/workflows/build-apk.yml`) that builds an installable release `.apk`:
-* **Workflow Name:** `Build Android APK`
-* **Artifact Location:** In the GitHub Actions run summary under **Artifacts** (`sentinal-authenticator-apk`).
-* **Package Identifier:** `com.sentinal.security`
+## 5. Automated CI/CD APK Build Pipeline
 
-## 6. Jira Project Tracking & Smart Commits
+The mobile repository includes an automated GitHub Actions pipeline (`.github/workflows/build-apk.yml`) for compiling and packaging the release `.apk`:
+
+### 5.1 Branch-Targeted Triggers
+* **Push / Merge to `development`**: Compiles the release APK for the `development` branch only and registers the build record under `development`.
+* **Push / Merge to `main`**: Compiles the release APK for the `main` branch only and registers the build record under `main`.
+* **Manual Dispatch (`workflow_dispatch`)**: Allows manual execution of the build on any chosen branch directly from GitHub Actions.
+
+### 5.2 Build Optimizations
+* **Single Architecture Compilation**: Restricts compilation to `arm64-v8a` (`-PreactNativeArchitectures=arm64-v8a`) specifically for modern devices (Samsung Galaxy S25 FE), reducing compile times by skipping obsolete 32-bit (`armeabi-v7a`) and x86 architectures.
+* **Gradle Worker Parallelization**: Leverages multi-core parallel execution (`--parallel --max-workers=4`) and allocates 4 GB JVM heap to avoid worker restarts.
+* **Bypassed Redundant Checks**: Skips slow release lint checks (`-x lint -x lintVitalRelease -x lintVitalAnalyzeRelease`).
+
+### 5.3 APK Signature Scheme v2 & v3 (Android 15 Compatibility)
+* Modern Android (Android 11 through Android 15, Target SDK 36) strictly rejects unsigned APKs or APKs signed solely with legacy v1 (JAR signing), displaying *"There was a problem parsing the package"* or *"Can't install app"*.
+* The CI pipeline automatically signs the compiled APK using Android SDK's `apksigner` with **v1, v2, and v3 signature schemes**:
+  ```bash
+  apksigner sign --ks android/app/debug.keystore --ks-pass pass:android --key-pass pass:android \
+    --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true \
+    --out sentinal-authenticator-arm64.apk app-release.apk
+  ```
+* All output builds pass `apksigner verify --verbose` before distribution.
+
+### 5.4 Installation & Direct Downloads
+
+| Method | Source | Format | Installation Instructions |
+| :--- | :--- | :--- | :--- |
+| **Web Download Portal** | Protected portal at `/dw` (Password: `seanisbtter`) | Pure `.apk` (42 MB) | **Recommended**: 1-tap direct download. Tapping the download button downloads `sentinal-authenticator-arm64.apk` directly. Tap the downloaded file to install immediately. |
+| **Direct File Endpoint** | `/builds/sentinal-authenticator-arm64.apk` | Pure `.apk` (42 MB) | Direct static download URL served by the web portal. |
+| **GitHub Actions Artifact** | Run summary under **Artifacts** | Compressed `.zip` | **Note**: GitHub automatically wraps artifacts in `.zip` archives. **Do not simply rename `.zip` to `.apk`**. You must extract/unzip the archive first to retrieve the signed `.apk` located inside. |
+
+## 6. Protected System Modules Policy
+
+The following CI/CD pipeline settings in `.github/workflows/build-apk.yml` are strictly protected:
+* Target architecture `arm64-v8a`
+* Gradle parallel flags (`--parallel --max-workers=4`)
+* Automated `apksigner` v2/v3 signing step
+* Central `/api/builds` webhook registration
+
+Do not alter or remove these configurations without team review to prevent breaking download access or Android installation compatibility.
+
+## 7. Jira Project Tracking & Smart Commits
 * Jira Board: [Sentinel Security (SS) Board](https://ractopen.atlassian.net/jira/software/projects/SS/boards/2)
-* Active Sprint: `SS Sprint 3 - UI/UX Design`
+* Project Key: `SS`
 * GitHub Integration: Commits pushed to `Sentinal-Security/mobile` automatically synchronize with Jira tickets.
-* Commit Convention: Include the Jira issue key in square brackets (e.g., `feat(ui): update authenticator tokens [SS-48]`) to link commits directly to the ticket.
+* Commit Convention: Include the Jira issue key in square brackets (e.g., `ci(mobile): update build triggers [SS-53]`).

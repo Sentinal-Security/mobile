@@ -2,7 +2,7 @@ name: Build Android APK (Optimized)
 
 on:
   push:
-    branches: [ main ]
+    branches: [ development, main ]
   workflow_dispatch:
 
 jobs:
