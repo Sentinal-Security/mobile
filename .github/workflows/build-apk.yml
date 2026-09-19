@@ -3,6 +3,12 @@ name: Build Android APK (Optimized)
 on:
   push:
     branches: [ development, main ]
+    paths-ignore:
+      - '**.md'
+      - '.gitignore'
+      - '.git-town.toml'
+      - 'LICENSE'
+      - 'docs/**'
   workflow_dispatch:
 
 jobs:
@@ -27,16 +33,27 @@ jobs:
           node-version: 20
           cache: 'npm'
 
+      - name: Setup CCache for Native C++
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: ${{ runner.os }}-android-arm64-v1
+          max-size: 2G
+
       - name: Install Node Dependencies
         run: npm ci
 
       - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@v4
+        with:
+          cache-read-only: false
 
       - name: Expo Prebuild Android
         run: npx expo prebuild --platform android --no-install
 
       - name: Fast Compile Release APK (arm64-v8a for Modern Phones)
+        env:
+          CMAKE_C_COMPILER_LAUNCHER: ccache
+          CMAKE_CXX_COMPILER_LAUNCHER: ccache
         run: |
           cd android
           ./gradlew assembleRelease \
@@ -47,6 +64,7 @@ jobs:
             --parallel \
             --max-workers=4 \
             -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m" \
+            -Dorg.gradle.caching=true \
             --no-daemon
 
       - name: Sign APK with Signature Scheme v2/v3
