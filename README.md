@@ -48,7 +48,21 @@ npx expo start --ios
 
 # Start web preview
 npx expo start --web
+```
 
-# Type check
+### Type Check
+```bash
 npx tsc --noEmit
 ```
+
+## 5. Automated Android APK Build Pipeline
+Every push to `development` or `main` triggers a GitHub Actions workflow (`.github/workflows/build-apk.yml`) that builds an installable release `.apk`:
+* **Workflow Name:** `Build Android APK`
+* **Artifact Location:** In the GitHub Actions run summary under **Artifacts** (`sentinal-authenticator-apk`).
+* **Package Identifier:** `com.sentinal.security`
+
+## 6. Jira Project Tracking & Smart Commits
+* Jira Board: [Sentinel Security (SS) Board](https://ractopen.atlassian.net/jira/software/projects/SS/boards/2)
+* Active Sprint: `SS Sprint 3 - UI/UX Design`
+* GitHub Integration: Commits pushed to `Sentinal-Security/mobile` automatically synchronize with Jira tickets.
+* Commit Convention: Include the Jira issue key in square brackets (e.g., `feat(ui): update authenticator tokens [SS-48]`) to link commits directly to the ticket.
