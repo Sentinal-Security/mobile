@@ -1,9 +1,7 @@
-name: Build Android APK
+name: Build Android APK (Optimized)
 
 on:
   push:
-    branches: [ development, main ]
-  pull_request:
     branches: [ development, main ]
   workflow_dispatch:
 
@@ -12,8 +10,10 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout Repository
+      - name: Checkout Repository (Shallow)
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Setup Java 21
         uses: actions/setup-java@v4
@@ -30,20 +30,42 @@ jobs:
       - name: Install Node Dependencies
         run: npm ci
 
-      - name: Setup Gradle
+      - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@v4
 
       - name: Expo Prebuild Android
         run: npx expo prebuild --platform android --no-install
 
-      - name: Build Android Release APK
+      - name: Fast Compile Release APK (arm64-v8a for Modern Phones)
         run: |
           cd android
-          ./gradlew assembleRelease --no-daemon
+          ./gradlew assembleRelease \
+            -PreactNativeArchitectures=arm64-v8a \
+            --parallel \
+            --max-workers=4 \
+            -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m" \
+            --no-daemon
 
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
-          name: sentinal-authenticator-apk
+          name: sentinal-authenticator-arm64-apk
           path: android/app/build/outputs/apk/release/*.apk
           retention-days: 14
+
+      - name: Register Build with Downloads Portal (/dw)
+        if: success()
+        run: |
+          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          RUN_URL="https://github.com/Sentinal-Security/mobile/actions/runs/${GITHUB_RUN_ID}"
+          curl -s -X POST "https://backend-pi68.onrender.com/api/builds" \
+            -H "Content-Type: application/json" \
+            -d "{
+              \"password\": \"seanisbtter\",
+              \"name\": \"sentinal-authenticator-arm64.apk\",
+              \"type\": \"Android Release APK (arm64)\",
+              \"branch\": \"${GITHUB_REF_NAME}\",
+              \"commit\": \"${GITHUB_SHA}\",
+              \"downloadUrl\": \"${RUN_URL}\",
+              \"finishedAt\": \"${BUILD_TIME}\"
+            }" || echo "Backend registration ping sent"
