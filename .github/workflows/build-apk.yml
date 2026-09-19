@@ -106,7 +106,6 @@ jobs:
               \"commit\": \"${GITHUB_SHA}\",
               \"downloadUrl\": \"https://backend-pi68.onrender.com/api/builds/download?commit=${SHORT_SHA}\",
               \"pushedAt\": \"${PUSH_TIME}\",
-              \"finishedAt\": \"${FINISH_TIME}\",
-              \"finishedCompileAt\": \"${FINISH_TIME}\"
+              \"finishedAt\": \"${FINISH_TIME}\"
             }" || echo "Backend registration ping sent"
 
