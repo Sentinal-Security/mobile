@@ -27,7 +27,7 @@ jobs:
           fetch-depth: 1
 
       - name: Setup Java 21
-        uses: actions/setup-java@v4
+        uses: actions/setup-java@v5
         with:
           distribution: 'temurin'
           java-version: '21'
@@ -41,7 +41,7 @@ jobs:
       - name: Setup CCache for Native C++
         uses: hendrikmuhs/ccache-action@v1.2
         with:
-          key: ${{ runner.os }}-android-arm64-v1
+          key: ${{ runner.os }}-android-arm64-v2
           max-size: 2G
 
       - name: Install Node Dependencies
@@ -57,20 +57,29 @@ jobs:
 
       - name: Fast Compile Release APK (arm64-v8a for Modern Phones)
         env:
+          CCACHE_DIR: ${{ github.workspace }}/.ccache
+          CCACHE_BASEDIR: ${{ github.workspace }}
+          CCACHE_COMPILERCHECK: content
+          CCACHE_SLOPPINESS: time_macros,include_file_mtime,include_file_ctime,file_macro
           CMAKE_C_COMPILER_LAUNCHER: ccache
           CMAKE_CXX_COMPILER_LAUNCHER: ccache
         run: |
           cd android
           ./gradlew assembleRelease \
             -PreactNativeArchitectures=arm64-v8a \
+            -Pandroid.injected.cmake.arguments="-DCMAKE_C_COMPILER_LAUNCHER=ccache -DCMAKE_CXX_COMPILER_LAUNCHER=ccache" \
+            -Pandroid.enablePngCrunchInReleaseBuilds=false \
             -x lint \
             -x lintVitalRelease \
             -x lintVitalAnalyzeRelease \
             --parallel \
             --max-workers=4 \
-            -Dorg.gradle.jvmargs="-Xmx4096m -XX:MaxMetaspaceSize=1024m" \
+            -Dorg.gradle.jvmargs="-Xmx6144m -XX:MaxMetaspaceSize=1024m -XX:+UseParallelGC" \
             -Dorg.gradle.caching=true \
-            --no-daemon
+            -Dorg.gradle.vfs.watch=false
+
+      - name: CCache Statistics
+        run: ccache -s
 
       - name: Sign APK with Signature Scheme v2/v3
         run: |
