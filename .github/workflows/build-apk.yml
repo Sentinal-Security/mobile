@@ -2,14 +2,19 @@ name: Build Android APK (Optimized)
 
 on:
   push:
-    branches: [ development, main ]
+    branches: [ development ]
     paths-ignore:
       - '**.md'
       - '.gitignore'
       - '.git-town.toml'
       - 'LICENSE'
       - 'docs/**'
+      - '.github/**'
   workflow_dispatch:
+
+concurrency:
+  group: mobile-build-${{ github.ref }}
+  cancel-in-progress: true
 
 jobs:
   build-apk:
