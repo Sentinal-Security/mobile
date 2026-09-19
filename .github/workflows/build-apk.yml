@@ -88,7 +88,8 @@ jobs:
       - name: Register Build with Downloads Portal (/dw)
         if: success()
         run: |
-          BUILD_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          PUSH_TIME=$(git log -1 --format=%cI)
+          FINISH_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           curl -s -X POST "https://backend-pi68.onrender.com/api/builds" \
             -H "Content-Type: application/json" \
             -d "{
@@ -97,6 +98,9 @@ jobs:
               \"type\": \"Android Release APK (arm64)\",
               \"branch\": \"${GITHUB_REF_NAME}\",
               \"commit\": \"${GITHUB_SHA}\",
-              \"downloadUrl\": \"/builds/sentinal-authenticator-arm64.apk\",
-              \"finishedAt\": \"${BUILD_TIME}\"
+              \"downloadUrl\": \"https://backend-pi68.onrender.com/api/builds/download\",
+              \"pushedAt\": \"${PUSH_TIME}\",
+              \"finishedAt\": \"${FINISH_TIME}\",
+              \"finishedCompileAt\": \"${FINISH_TIME}\"
             }" || echo "Backend registration ping sent"
+
