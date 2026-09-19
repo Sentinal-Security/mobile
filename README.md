@@ -103,3 +103,53 @@ Do not alter or remove these configurations without team review to prevent break
 * Project Key: `SS`
 * GitHub Integration: Commits pushed to `Sentinal-Security/mobile` automatically synchronize with Jira tickets.
 * Commit Convention: Include the Jira issue key in square brackets (e.g., `ci(mobile): update build triggers [SS-53]`).
+
+## 8. Git Workflow & Git Town Setup
+
+To keep the development branch synchronized and avoid merge conflicts, all contributors must sync their local branch before making or pushing any changes.
+
+### 8.1 Daily Sync Protocol (Always Sync First)
+Before starting any new feature or bugfix, always pull the latest changes from the remote repository:
+
+```bash
+# Using Git Town (Recommended)
+git town sync
+
+# Or using standard Git
+git checkout development
+git pull origin development
+```
+
+### 8.2 Git Town Setup & Initialization
+This repository includes a pre-configured `.git-town.toml` file with:
+* **Main Branch**: `main` (production release branch)
+* **Perennial Branch**: `development` (active integration branch)
+
+To initialize or verify Git Town on your local clone:
+```bash
+# If running Git Town for the first time in this repo
+git town init
+
+# Verify active branch configuration
+git town config
+```
+Because `.git-town.toml` is committed to the repository, Git Town automatically adopts the project branch conventions without requiring manual setup.
+
+### 8.3 Recommended Feature Workflow
+1. **Create a new feature branch**:
+   ```bash
+   git town hack feature/your-feature-name
+   ```
+2. **Commit changes**: Include the Jira ticket key in square brackets:
+   ```bash
+   git commit -m "feat(module): description of changes [SS-XX]"
+   ```
+3. **Synchronize with latest updates**:
+   ```bash
+   git town sync
+   ```
+4. **Merge / Ship to development**:
+   ```bash
+   git town ship
+   ```
+
