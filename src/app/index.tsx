@@ -74,7 +74,8 @@ export default function AuthenticatorScreen() {
           resizeMode="contain"
         />
         <View>
-          <Text style={styles.header}>Sentinal Authenticator</Text>
+          <Text style={styles.header}>Sentinel Authenticator</Text>
+
           <Text style={styles.subHeader}>RFC 6238 Standard 6-Digit TOTP</Text>
         </View>
       </View>
