@@ -7,6 +7,7 @@ import {
   FlatList,
   StyleSheet,
   Alert,
+  Image,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { generateTotp, getSecondsRemaining } from "@/utils/totp";
@@ -66,8 +67,18 @@ export default function AuthenticatorScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      <Text style={styles.header}>Sentinal Authenticator (Android)</Text>
-      <Text style={styles.subHeader}>RFC 6238 Standard 6-Digit TOTP</Text>
+      <View style={styles.headerRow}>
+        <Image
+          source={require("../../assets/images/icon.png")}
+          style={styles.logoImage}
+          resizeMode="contain"
+        />
+        <View>
+          <Text style={styles.header}>Sentinal Authenticator</Text>
+          <Text style={styles.subHeader}>RFC 6238 Standard 6-Digit TOTP</Text>
+        </View>
+      </View>
+
 
       <View style={styles.timerBar}>
         <Text style={styles.timerText}>
@@ -143,6 +154,17 @@ const styles = StyleSheet.create({
     padding: 16,
     backgroundColor: "#ffffff",
   },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    marginBottom: 12,
+    gap: 12,
+  },
+  logoImage: {
+    width: 44,
+    height: 44,
+    borderRadius: 8,
+  },
   header: {
     fontSize: 20,
     fontWeight: "bold",
@@ -152,8 +174,8 @@ const styles = StyleSheet.create({
   subHeader: {
     fontSize: 13,
     color: "#666666",
-    marginBottom: 12,
   },
+
   timerBar: {
     padding: 8,
     backgroundColor: "#f0f4f8",
