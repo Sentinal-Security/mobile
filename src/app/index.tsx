@@ -204,13 +204,19 @@ export default function AuthenticatorScreen() {
               <Text style={styles.closeButtonText}>Close ✕</Text>
             </TouchableOpacity>
           </View>
-          <CameraView
-            style={styles.cameraView}
-            barcodeScannerSettings={{
-              barcodeTypes: ["qr"],
-            }}
-            onBarcodeScanned={handleBarcodeScanned}
-          />
+          {showScanner && permission?.granted ? (
+            <CameraView
+              style={styles.cameraView}
+              barcodeScannerSettings={{
+                barcodeTypes: ["qr"],
+              }}
+              onBarcodeScanned={handleBarcodeScanned}
+            />
+          ) : (
+            <View style={[styles.cameraView, { justifyContent: "center", alignItems: "center" }]}>
+              <Text style={{ color: "#ffffff", fontSize: 14 }}>Initializing camera...</Text>
+            </View>
+          )}
         </SafeAreaView>
       </Modal>
     </SafeAreaView>
