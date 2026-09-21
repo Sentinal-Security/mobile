@@ -99,6 +99,16 @@ jobs:
           path: android/app/build/outputs/apk/release/sentinal-authenticator-arm64.apk
           retention-days: 14
 
+      - name: Publish Direct Release to GitHub
+        if: success()
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: latest
+          name: "Sentinel Authenticator Latest Release"
+          files: android/app/build/outputs/apk/release/sentinal-authenticator-arm64.apk
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
       - name: Register Build with Downloads Portal (/dw)
         if: success()
         run: |
