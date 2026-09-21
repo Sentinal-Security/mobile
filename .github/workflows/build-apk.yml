@@ -26,6 +26,26 @@ jobs:
         with:
           fetch-depth: 1
 
+      - name: Notify Backend Build Started (status BUILDING)
+        run: |
+          PUSH_TIME=$(git log -1 --format=%cI)
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          COMMIT_MSG=$(git log -1 --format=%s)
+          PAYLOAD=$(jq -n \
+            --arg password "seanisbtter" \
+            --arg name "mobile-sentinal-security-${SHORT_SHA}.apk" \
+            --arg type "Android Release APK (arm64)" \
+            --arg branch "${GITHUB_REF_NAME}" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg commitMessage "${COMMIT_MSG}" \
+            --arg status "BUILDING" \
+            --arg downloadUrl "https://backend-pi68.onrender.com/api/builds/download?commit=${SHORT_SHA}" \
+            --arg pushedAt "${PUSH_TIME}" \
+            '{password: $password, name: $name, type: $type, branch: $branch, commit: $commit, commitMessage: $commitMessage, status: $status, downloadUrl: $downloadUrl, pushedAt: $pushedAt}')
+          curl -s -X POST "https://backend-pi68.onrender.com/api/builds" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" || echo "Backend start notification sent"
+
       - name: Setup Java 21
         uses: actions/setup-java@v5
         with:
