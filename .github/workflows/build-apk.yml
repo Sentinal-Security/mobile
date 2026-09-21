@@ -138,3 +138,26 @@ jobs:
             -F "pushedAt=${PUSH_TIME}" \
             -F "finishedAt=${FINISH_TIME}" || echo "Backend artifact upload completed"
 
+      - name: Notify Backend Build Failed (status FAILURE)
+        if: failure()
+        run: |
+          PUSH_TIME=$(git log -1 --format=%cI)
+          FINISH_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          COMMIT_MSG=$(git log -1 --format=%s)
+          PAYLOAD=$(jq -n \
+            --arg password "seanisbtter" \
+            --arg name "mobile-sentinal-security-${SHORT_SHA}.apk" \
+            --arg type "Android Release APK (arm64)" \
+            --arg branch "${GITHUB_REF_NAME}" \
+            --arg commit "${GITHUB_SHA}" \
+            --arg commitMessage "${COMMIT_MSG}" \
+            --arg status "FAILURE" \
+            --arg downloadUrl "" \
+            --arg pushedAt "${PUSH_TIME}" \
+            --arg finishedAt "${FINISH_TIME}" \
+            '{password: $password, name: $name, type: $type, branch: $branch, commit: $commit, commitMessage: $commitMessage, status: $status, downloadUrl: $downloadUrl, pushedAt: $pushedAt, finishedAt: $finishedAt}')
+          curl -s -X POST "https://backend-pi68.onrender.com/api/builds" \
+            -H "Content-Type: application/json" \
+            -d "$PAYLOAD" || echo "Backend failure notification sent"
+
