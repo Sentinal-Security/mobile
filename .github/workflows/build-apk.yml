@@ -1,15 +1,6 @@
 name: Build Android APK (Optimized)
 
 on:
-  push:
-    branches: [ development ]
-    paths-ignore:
-      - '**.md'
-      - '.gitignore'
-      - '.git-town.toml'
-      - 'LICENSE'
-      - 'docs/**'
-      - '.github/**'
   workflow_dispatch:
 
 concurrency:
@@ -65,7 +56,7 @@ jobs:
           max-size: 2G
 
       - name: Install Node Dependencies
-        run: npm ci
+        run: npm ci --prefer-offline --no-audit
 
       - name: Setup Gradle Cache
         uses: gradle/actions/setup-gradle@v4
