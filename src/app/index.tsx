@@ -20,6 +20,17 @@ interface TotpAccount {
   secret: string;
 }
 
+const API_BASE_URL = "https://backend-pi68.onrender.com";
+
+interface PendingChallenge {
+  id: number;
+  userId: number;
+  email: string;
+  matchCode: string;
+  clientOrigin: string;
+  options: string[];
+}
+
 export default function AuthenticatorScreen() {
   const [accounts, setAccounts] = useState<TotpAccount[]>([]);
   const [accountName, setAccountName] = useState("");
@@ -28,6 +39,9 @@ export default function AuthenticatorScreen() {
   const [showScanner, setShowScanner] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
 
+  const [pendingChallenge, setPendingChallenge] = useState<PendingChallenge | null>(null);
+  const [respondingChallenge, setRespondingChallenge] = useState(false);
+
   useEffect(() => {
     const timer = setInterval(() => {
       setRemainingSeconds(getSecondsRemaining());
@@ -35,6 +49,98 @@ export default function AuthenticatorScreen() {
 
     return () => clearInterval(timer);
   }, []);
+
+  // Poll for active push verification challenges
+  useEffect(() => {
+    let isMounted = true;
+
+    const checkPendingChallenges = async () => {
+      // Gather emails to check: enrolled accounts, or currently typed accountName
+      const emailsToCheck = new Set<string>();
+      accounts.forEach((acc) => {
+        if (acc.name && acc.name.includes("@")) {
+          emailsToCheck.add(acc.name.trim().toLowerCase());
+        }
+      });
+      if (accountName.trim().includes("@")) {
+        emailsToCheck.add(accountName.trim().toLowerCase());
+      }
+
+      if (emailsToCheck.size === 0) return;
+
+      for (const email of emailsToCheck) {
+        try {
+          const res = await fetch(
+            `${API_BASE_URL}/api/mfa/challenge/pending?email=${encodeURIComponent(email)}`
+          );
+          if (!res.ok) continue;
+          const json = await res.json();
+          if (json.success && json.data?.hasPending && json.data.challenge) {
+            const ch = json.data.challenge;
+            if (!isMounted) return;
+
+            setPendingChallenge((prev) => {
+              if (prev && prev.id === ch.id) return prev;
+              const matchNum = parseInt(ch.matchCode, 10) || 42;
+              const d1 = (((matchNum + 17) % 90) + 10).toString();
+              const d2 = (((matchNum + 43) % 90) + 10).toString();
+              const opts = [ch.matchCode, d1, d2].sort(() => Math.random() - 0.5);
+              return {
+                id: ch.id,
+                userId: ch.userId,
+                email: ch.email,
+                matchCode: ch.matchCode,
+                clientOrigin: ch.clientOrigin || "Sentinel Web Portal",
+                options: opts,
+              };
+            });
+            break;
+          }
+        } catch {
+          // Ignore network errors during polling
+        }
+      }
+    };
+
+    checkPendingChallenges();
+    const pollInterval = setInterval(checkPendingChallenges, 3000);
+
+    return () => {
+      isMounted = false;
+      clearInterval(pollInterval);
+    };
+  }, [accounts, accountName]);
+
+  const handleRespondChallenge = async (action: "APPROVE" | "DENY", selectedCode?: string) => {
+    if (!pendingChallenge) return;
+    setRespondingChallenge(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/mfa/challenge/respond`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          challengeId: pendingChallenge.id,
+          action,
+          selectedCode,
+        }),
+      });
+      const json = await res.json();
+      if (json.success) {
+        if (action === "APPROVE") {
+          Alert.alert("Authorization Approved", "Sign-in approved successfully.");
+        } else {
+          Alert.alert("Authorization Denied", "Sign-in request denied.");
+        }
+        setPendingChallenge(null);
+      } else {
+        Alert.alert("Verification Error", json.message || "Failed to process authorization.");
+      }
+    } catch {
+      Alert.alert("Network Error", "Could not reach Sentinel Security Gateway.");
+    } finally {
+      setRespondingChallenge(false);
+    }
+  };
 
   const handleAddAccount = (name?: string, secret?: string) => {
     const cleanName = (name || accountName).trim();
@@ -154,6 +260,10 @@ export default function AuthenticatorScreen() {
             </View>
             <Text style={styles.headerTitle}>Authenticator</Text>
             <Text style={styles.headerSubtitle}>RFC 6238 Standard 6-Digit TOTP</Text>
+            <View style={styles.pushStatusBadge}>
+              <View style={styles.pushActivePulse} />
+              <Text style={styles.pushStatusText}>PUSH ACTIVE</Text>
+            </View>
           </View>
         </View>
       </View>
@@ -310,6 +420,58 @@ export default function AuthenticatorScreen() {
             </View>
           )}
         </SafeAreaView>
+      </Modal>
+
+      {/* In-App Push Authorization Modal (Number Matching) */}
+      <Modal
+        visible={pendingChallenge !== null}
+        animationType="fade"
+        transparent={true}
+        onRequestClose={() => handleRespondChallenge("DENY")}
+      >
+        <View style={styles.pushModalOverlay}>
+          <View style={styles.pushModalCard}>
+            <View style={styles.pushHeaderRow}>
+              <View style={styles.pushStatusDot} />
+              <Text style={styles.pushModalTitle}>INCOMING SIGN-IN REQUEST</Text>
+            </View>
+
+            <View style={styles.pushDetailsBox}>
+              <Text style={styles.pushOriginLabel}>APPLICATION</Text>
+              <Text style={styles.pushOriginValue}>{pendingChallenge?.clientOrigin}</Text>
+
+              <Text style={styles.pushEmailLabel}>ACCOUNT</Text>
+              <Text style={styles.pushEmailValue}>{pendingChallenge?.email}</Text>
+            </View>
+
+            <Text style={styles.pushPromptText}>
+              Select the number displayed on your browser screen to approve access:
+            </Text>
+
+            <View style={styles.numberOptionsRow}>
+              {pendingChallenge?.options.map((opt) => (
+                <TouchableOpacity
+                  key={opt}
+                  disabled={respondingChallenge}
+                  style={styles.numberOptionButton}
+                  onPress={() => handleRespondChallenge("APPROVE", opt)}
+                >
+                  <Text style={styles.numberOptionText}>{opt}</Text>
+                </TouchableOpacity>
+              ))}
+            </View>
+
+            <TouchableOpacity
+              disabled={respondingChallenge}
+              style={styles.denyButton}
+              onPress={() => handleRespondChallenge("DENY")}
+            >
+              <Text style={styles.denyButtonText}>
+                {respondingChallenge ? "PROCESSING..." : "DENY REQUEST"}
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
       </Modal>
     </SafeAreaView>
   );
@@ -717,5 +879,146 @@ const styles = StyleSheet.create({
   cameraFallbackText: {
     color: "#94a3b8",
     fontSize: 13,
+  },
+  pushStatusBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 5,
+    marginTop: 6,
+    alignSelf: "flex-start",
+    backgroundColor: "rgba(84, 244, 252, 0.08)",
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.25)",
+  },
+  pushActivePulse: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#54f4fc",
+  },
+  pushStatusText: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#54f4fc",
+    letterSpacing: 1,
+  },
+  pushModalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.85)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  pushModalCard: {
+    width: "100%",
+    maxWidth: 380,
+    backgroundColor: "#070c16",
+    borderWidth: 2,
+    borderColor: "#54f4fc",
+    borderRadius: 8,
+    padding: 20,
+    shadowColor: "#54f4fc",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  pushHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 16,
+  },
+  pushStatusDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "#54f4fc",
+  },
+  pushModalTitle: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#54f4fc",
+    letterSpacing: 1.2,
+  },
+  pushDetailsBox: {
+    backgroundColor: "#0b1322",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.15)",
+    borderRadius: 6,
+    padding: 12,
+    marginBottom: 16,
+  },
+  pushOriginLabel: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#64748b",
+    letterSpacing: 1,
+    marginBottom: 2,
+  },
+  pushOriginValue: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#ffffff",
+    marginBottom: 8,
+  },
+  pushEmailLabel: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#64748b",
+    letterSpacing: 1,
+    marginBottom: 2,
+  },
+  pushEmailValue: {
+    fontSize: 12,
+    fontWeight: "600",
+    color: "#94a3b8",
+    fontFamily: "monospace",
+  },
+  pushPromptText: {
+    fontSize: 12,
+    color: "#cbd5e1",
+    textAlign: "center",
+    marginBottom: 16,
+    lineHeight: 18,
+  },
+  numberOptionsRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    gap: 10,
+    marginBottom: 16,
+  },
+  numberOptionButton: {
+    flex: 1,
+    backgroundColor: "rgba(84, 244, 252, 0.08)",
+    borderWidth: 1.5,
+    borderColor: "#54f4fc",
+    borderRadius: 6,
+    paddingVertical: 14,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  numberOptionText: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#54f4fc",
+    fontFamily: "monospace",
+  },
+  denyButton: {
+    borderWidth: 1,
+    borderColor: "#ef4444",
+    backgroundColor: "rgba(239, 68, 68, 0.08)",
+    paddingVertical: 12,
+    borderRadius: 4,
+    alignItems: "center",
+  },
+  denyButtonText: {
+    color: "#ef4444",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 1,
   },
 });
