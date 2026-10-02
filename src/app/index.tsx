@@ -57,15 +57,29 @@ export default function AuthenticatorScreen() {
     setShowScanner(false);
   };
 
-  const handleDeleteAccount = (id: string) => {
-    setAccounts((prev) => prev.filter((acc) => acc.id !== id));
+  const confirmDeleteAccount = (id: string, name: string) => {
+    Alert.alert(
+      "Remove Account",
+      `Are you sure you want to remove ${name}? This will delete the 2FA key from this device.`,
+      [
+        { text: "Cancel", style: "cancel" },
+        {
+          text: "Remove",
+          style: "destructive",
+          onPress: () => setAccounts((prev) => prev.filter((acc) => acc.id !== id)),
+        },
+      ]
+    );
   };
 
   const handleOpenScanner = async () => {
     if (!permission?.granted) {
       const res = await requestPermission();
       if (!res.granted) {
-        Alert.alert("Camera Permission Required", "Camera access is needed to scan QR codes.");
+        Alert.alert(
+          "Camera Permission Required",
+          "Camera access is required to scan QR codes for pairing."
+        );
         return;
       }
     }
@@ -75,95 +89,138 @@ export default function AuthenticatorScreen() {
   const handleBarcodeScanned = ({ data }: { data: string }) => {
     if (!data) return;
 
-    // Parse otpauth://totp/Issuer:Account?secret=XXX&issuer=YYY
+    // Handle otpauth://totp/URI format
     if (data.startsWith("otpauth://")) {
-      try {
-        const url = new URL(data);
-        const secret = url.searchParams.get("secret");
-        const pathParts = decodeURIComponent(url.pathname).replace(/^\/\/?(totp\/)?/, "").split(":");
-        const name = pathParts.length > 1 ? pathParts[1] : pathParts[0];
+      let secret = "";
+      let name = "";
 
-        if (secret) {
-          handleAddAccount(name || "Scanned Account", secret);
-          Alert.alert("Account Added", `Successfully paired 2FA for ${name || "Scanned Account"}`);
-          return;
+      const secretMatch = data.match(/[?&]secret=([A-Za-z2-7]+)/i);
+      if (secretMatch && secretMatch[1]) {
+        secret = secretMatch[1].toUpperCase();
+      }
+
+      const issuerMatch = data.match(/[?&]issuer=([^&]+)/i);
+      const issuer = issuerMatch ? decodeURIComponent(issuerMatch[1]) : "";
+
+      const labelMatch = data.match(/otpauth:\/\/totp\/([^?]+)/i);
+      if (labelMatch && labelMatch[1]) {
+        const rawLabel = decodeURIComponent(labelMatch[1]);
+        if (rawLabel.includes(":")) {
+          const parts = rawLabel.split(":");
+          name = parts[1] || parts[0];
+        } else {
+          name = rawLabel;
         }
-      } catch (e) {
-        // Fallback to raw string parsing if URL parsing fails
+      }
+
+      if (!name && issuer) {
+        name = issuer;
+      }
+
+      if (secret) {
+        handleAddAccount(name || "Sentinel Account", secret);
+        Alert.alert("Account Paired", `Successfully enrolled 2FA for ${name || "Sentinel Account"}`);
+        return;
       }
     }
 
-    // Direct secret key scan fallback
+    // Direct Base32 key fallback
     const cleanSecret = data.trim().toUpperCase().replace(/\s+/g, "");
-    if (cleanSecret.length >= 8) {
-      handleAddAccount("Scanned Account", cleanSecret);
-      Alert.alert("Account Added", "Successfully paired 2FA secret key from QR Code.");
+    if (cleanSecret.length >= 8 && /^[A-Z2-7]+$/.test(cleanSecret)) {
+      handleAddAccount("Enrolled Account", cleanSecret);
+      Alert.alert("Account Paired", "Successfully enrolled 2FA secret key from QR code.");
     } else {
       Alert.alert("Invalid QR Code", "Scanned code does not contain a valid Base32 2FA secret.");
       setShowScanner(false);
     }
   };
 
+  const progressPercent = Math.max(0, Math.min(100, (remainingSeconds / 30) * 100));
+
   return (
     <SafeAreaView style={styles.container}>
-      <View style={styles.headerRow}>
-        <Image
-          source={require("../../assets/images/icon.png")}
-          style={styles.logoImage}
-          resizeMode="contain"
-        />
-        <View>
-          <Text style={styles.header}>Sentinel Authenticator</Text>
-          <Text style={styles.subHeader}>RFC 6238 Standard 6-Digit TOTP</Text>
+      {/* Enterprise Header with Sentinel Bracket Accent */}
+      <View style={styles.headerContainer}>
+        <View style={styles.headerLeft}>
+          <Image
+            source={require("../../assets/images/icon.png")}
+            style={styles.logoImage}
+            resizeMode="contain"
+          />
+          <View style={styles.headerTextGroup}>
+            <View style={styles.badgeRow}>
+              <View style={styles.statusDot} />
+              <Text style={styles.brandBadge}>SENTINEL SECURITY</Text>
+            </View>
+            <Text style={styles.headerTitle}>Authenticator</Text>
+            <Text style={styles.headerSubtitle}>RFC 6238 Standard 6-Digit TOTP</Text>
+          </View>
         </View>
       </View>
 
-      <View style={styles.timerBar}>
-        <Text style={styles.timerText}>
-          Next Code Refresh in: <Text style={styles.timerBold}>{remainingSeconds}s</Text>
-        </Text>
+      {/* Synchronized 30-Second Refresh Progress Bar */}
+      <View style={styles.timerCard}>
+        <View style={styles.timerHeaderRow}>
+          <Text style={styles.timerLabel}>TOKEN REFRESH WINDOW</Text>
+          <Text style={styles.timerCountdown}>{remainingSeconds}s remaining</Text>
+        </View>
+        <View style={styles.progressTrack}>
+          <View style={[styles.progressBar, { width: `${progressPercent}%` }]} />
+        </View>
       </View>
 
-      {/* Pairing Actions: QR Scan or Manual Input */}
-      <View style={styles.formContainer}>
-        <Text style={styles.formTitle}>Pair New 2FA Account</Text>
+      {/* Account Enrollment Section */}
+      <View style={styles.enrollmentCard}>
+        <View style={styles.enrollmentHeader}>
+          <Text style={styles.enrollmentTitle}>PAIR NEW 2FA ACCOUNT</Text>
+        </View>
 
-        <TouchableOpacity style={styles.scanButton} onPress={handleOpenScanner}>
-          <Text style={styles.scanButtonText}>📷 Scan QR Code with Camera</Text>
+        <TouchableOpacity style={styles.primaryScanButton} onPress={handleOpenScanner}>
+          <Text style={styles.primaryScanButtonText}>SCAN QR CODE</Text>
         </TouchableOpacity>
 
-        <View style={styles.divider}>
-          <View style={styles.line} />
-          <Text style={styles.dividerText}>OR MANUAL ENTRY</Text>
-          <View style={styles.line} />
+        <View style={styles.dividerRow}>
+          <View style={styles.dividerLine} />
+          <Text style={styles.dividerText}>OR MANUAL KEY ENTRY</Text>
+          <View style={styles.dividerLine} />
         </View>
 
         <TextInput
-          style={styles.input}
+          style={styles.inputField}
           placeholder="Account Name (e.g. user@domain.com)"
-          placeholderTextColor="#888"
+          placeholderTextColor="#64748b"
           value={accountName}
           onChangeText={setAccountName}
           autoCapitalize="none"
+          autoCorrect={false}
         />
         <TextInput
-          style={styles.input}
+          style={styles.inputField}
           placeholder="Base32 Secret Key"
-          placeholderTextColor="#888"
+          placeholderTextColor="#64748b"
           value={secretKey}
           onChangeText={setSecretKey}
           autoCapitalize="characters"
+          autoCorrect={false}
         />
-        <TouchableOpacity style={styles.button} onPress={() => handleAddAccount()}>
-          <Text style={styles.buttonText}>+ Add Account Key</Text>
+
+        <TouchableOpacity style={styles.addKeyButton} onPress={() => handleAddAccount()}>
+          <Text style={styles.addKeyButtonText}>ADD ACCOUNT KEY</Text>
         </TouchableOpacity>
       </View>
 
-      <Text style={styles.sectionTitle}>Active 2FA Accounts ({accounts.length})</Text>
+      {/* Active Accounts Section */}
+      <View style={styles.accountsHeaderRow}>
+        <Text style={styles.sectionHeaderTitle}>ENROLLED ACCOUNTS</Text>
+        <View style={styles.counterBadge}>
+          <Text style={styles.counterBadgeText}>{accounts.length}</Text>
+        </View>
+      </View>
 
       <FlatList
         data={accounts}
         keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.listContent}
         renderItem={({ item }) => {
           const code = generateTotp(item.secret);
           const formattedCode =
@@ -171,50 +228,85 @@ export default function AuthenticatorScreen() {
 
           return (
             <View style={styles.accountCard}>
-              <View style={styles.accountInfo}>
-                <Text style={styles.accountName}>{item.name}</Text>
-                <Text style={styles.totpCode}>{formattedCode}</Text>
-                <Text style={styles.secretHint}>Secret: {item.secret}</Text>
+              <View style={styles.accountTopRow}>
+                <Text style={styles.accountName} numberOfLines={1}>
+                  {item.name}
+                </Text>
+                <View style={styles.protocolBadge}>
+                  <Text style={styles.protocolBadgeText}>SHA-1 / 30S</Text>
+                </View>
               </View>
-              <TouchableOpacity
-                style={styles.deleteButton}
-                onPress={() => handleDeleteAccount(item.id)}
-              >
-                <Text style={styles.deleteButtonText}>Delete</Text>
-              </TouchableOpacity>
+
+              <View style={styles.tokenRow}>
+                <Text style={styles.totpToken}>{formattedCode}</Text>
+                <TouchableOpacity
+                  style={styles.removeButton}
+                  onPress={() => confirmDeleteAccount(item.id, item.name)}
+                >
+                  <Text style={styles.removeButtonText}>REMOVE</Text>
+                </TouchableOpacity>
+              </View>
+
+              <Text style={styles.secretHintText} numberOfLines={1}>
+                KEY: {item.secret.slice(0, 6)}...{item.secret.slice(-4)}
+              </Text>
             </View>
           );
         }}
         ListEmptyComponent={
-          <View style={styles.emptyContainer}>
-            <Text style={styles.emptyText}>No accounts paired yet.</Text>
-            <Text style={styles.emptySubText}>
-              Scan a QR code or enter a secret key above to pair your account.
+          <View style={styles.emptyCard}>
+            <View style={styles.emptyBracket} />
+            <Text style={styles.emptyTitle}>NO SECURITY KEYS ENROLLED</Text>
+            <Text style={styles.emptyDescription}>
+              Scan an enrollment QR code from the Sentinel Web Portal or enter a Base32
+              provisioning key to begin generating one-time passcodes.
             </Text>
           </View>
         }
       />
 
-      {/* QR Code Scanner Modal */}
-      <Modal visible={showScanner} animationType="slide" onRequestClose={() => setShowScanner(false)}>
-        <SafeAreaView style={styles.scannerModal}>
-          <View style={styles.scannerHeader}>
-            <Text style={styles.scannerTitle}>Scan 2FA QR Code</Text>
-            <TouchableOpacity onPress={() => setShowScanner(false)} style={styles.closeButton}>
-              <Text style={styles.closeButtonText}>Close ✕</Text>
+      {/* Full-Screen QR Code Scanner Modal */}
+      <Modal
+        visible={showScanner}
+        animationType="slide"
+        onRequestClose={() => setShowScanner(false)}
+      >
+        <SafeAreaView style={styles.scannerContainer}>
+          <View style={styles.scannerNavbar}>
+            <View>
+              <Text style={styles.scannerNavTitle}>Scan Enrollment QR Code</Text>
+              <Text style={styles.scannerNavSubtitle}>Point camera at the Sentinel QR code</Text>
+            </View>
+            <TouchableOpacity
+              onPress={() => setShowScanner(false)}
+              style={styles.scannerCloseButton}
+            >
+              <Text style={styles.scannerCloseButtonText}>CLOSE</Text>
             </TouchableOpacity>
           </View>
+
           {showScanner && permission?.granted ? (
-            <CameraView
-              style={styles.cameraView}
-              barcodeScannerSettings={{
-                barcodeTypes: ["qr"],
-              }}
-              onBarcodeScanned={handleBarcodeScanned}
-            />
+            <View style={styles.cameraWrapper}>
+              <CameraView
+                style={styles.cameraView}
+                barcodeScannerSettings={{
+                  barcodeTypes: ["qr"],
+                }}
+                onBarcodeScanned={handleBarcodeScanned}
+              />
+              <View style={styles.viewfinderOverlay}>
+                <View style={styles.viewfinderBox}>
+                  <View style={[styles.cornerBracket, styles.topLeftBracket]} />
+                  <View style={[styles.cornerBracket, styles.topRightBracket]} />
+                  <View style={[styles.cornerBracket, styles.bottomLeftBracket]} />
+                  <View style={[styles.cornerBracket, styles.bottomRightBracket]} />
+                </View>
+                <Text style={styles.viewfinderHint}>Align QR code within the frame</Text>
+              </View>
+            </View>
           ) : (
-            <View style={[styles.cameraView, { justifyContent: "center", alignItems: "center" }]}>
-              <Text style={{ color: "#ffffff", fontSize: 14 }}>Initializing camera...</Text>
+            <View style={styles.cameraFallback}>
+              <Text style={styles.cameraFallbackText}>Initializing camera...</Text>
             </View>
           )}
         </SafeAreaView>
@@ -226,199 +318,404 @@ export default function AuthenticatorScreen() {
 const styles = StyleSheet.create({
   container: {
     flex: 1,
-    padding: 16,
-    backgroundColor: "#ffffff",
+    paddingHorizontal: 16,
+    paddingTop: 12,
+    backgroundColor: "#000000",
   },
-  headerRow: {
+  headerContainer: {
+    marginBottom: 16,
+    paddingBottom: 14,
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(84, 244, 252, 0.15)",
+  },
+  headerLeft: {
     flexDirection: "row",
     alignItems: "center",
-    marginBottom: 12,
     gap: 12,
   },
   logoImage: {
-    width: 44,
-    height: 44,
+    width: 46,
+    height: 46,
     borderRadius: 8,
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.35)",
   },
-  header: {
-    fontSize: 20,
-    fontWeight: "bold",
-    color: "#111111",
+  headerTextGroup: {
+    flex: 1,
+  },
+  badgeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
     marginBottom: 2,
   },
-  subHeader: {
-    fontSize: 13,
-    color: "#666666",
+  statusDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#54f4fc",
   },
-  timerBar: {
-    padding: 8,
-    backgroundColor: "#f0f4f8",
+  brandBadge: {
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 1.5,
+    color: "#54f4fc",
+  },
+  headerTitle: {
+    fontSize: 20,
+    fontWeight: "800",
+    color: "#ffffff",
+    letterSpacing: -0.3,
+  },
+  headerSubtitle: {
+    fontSize: 11,
+    color: "#94a3b8",
+    fontWeight: "500",
+    marginTop: 1,
+  },
+  timerCard: {
+    backgroundColor: "#070c16",
     borderWidth: 1,
-    borderColor: "#d0d7de",
-    borderRadius: 4,
-    marginBottom: 14,
-  },
-  timerText: {
-    fontSize: 13,
-    color: "#333333",
-  },
-  timerBold: {
-    fontWeight: "bold",
-    color: "#0969da",
-  },
-  formContainer: {
-    padding: 12,
-    borderWidth: 1,
-    borderColor: "#cccccc",
-    borderRadius: 4,
+    borderColor: "rgba(84, 244, 252, 0.2)",
+    borderRadius: 6,
+    padding: 10,
     marginBottom: 16,
-    backgroundColor: "#fafafa",
   },
-  formTitle: {
-    fontSize: 14,
-    fontWeight: "bold",
-    marginBottom: 10,
-    color: "#222222",
+  timerHeaderRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 8,
   },
-  scanButton: {
-    backgroundColor: "#0969da",
+  timerLabel: {
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 1,
+    color: "#94a3b8",
+  },
+  timerCountdown: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#54f4fc",
+    fontFamily: "monospace",
+  },
+  progressTrack: {
+    height: 5,
+    backgroundColor: "#0f172a",
+    borderRadius: 3,
+    overflow: "hidden",
+  },
+  progressBar: {
+    height: "100%",
+    backgroundColor: "#54f4fc",
+    borderRadius: 3,
+  },
+  enrollmentCard: {
+    backgroundColor: "#070c16",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.2)",
+    borderRadius: 6,
+    padding: 14,
+    marginBottom: 16,
+  },
+  enrollmentHeader: {
+    marginBottom: 12,
+  },
+  enrollmentTitle: {
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 1.2,
+    color: "#54f4fc",
+  },
+  primaryScanButton: {
+    backgroundColor: "#54f4fc",
     paddingVertical: 12,
     borderRadius: 4,
     alignItems: "center",
-    marginBottom: 10,
+    justifyContent: "center",
   },
-  scanButtonText: {
-    color: "#ffffff",
-    fontWeight: "bold",
-    fontSize: 14,
+  primaryScanButtonText: {
+    color: "#000000",
+    fontWeight: "800",
+    fontSize: 13,
+    letterSpacing: 1,
   },
-  divider: {
+  dividerRow: {
     flexDirection: "row",
     alignItems: "center",
-    marginVertical: 10,
+    marginVertical: 12,
   },
-  line: {
+  dividerLine: {
     flex: 1,
     height: 1,
-    backgroundColor: "#dddddd",
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
   },
   dividerText: {
-    fontSize: 11,
-    color: "#888888",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 1,
+    color: "#64748b",
     marginHorizontal: 8,
-    fontWeight: "600",
   },
-  input: {
+  inputField: {
+    backgroundColor: "#030712",
     borderWidth: 1,
-    borderColor: "#cccccc",
+    borderColor: "rgba(84, 244, 252, 0.25)",
     borderRadius: 4,
-    padding: 8,
-    fontSize: 14,
-    backgroundColor: "#ffffff",
-    marginBottom: 8,
-    color: "#000000",
-  },
-  button: {
-    backgroundColor: "#000000",
+    paddingHorizontal: 12,
     paddingVertical: 10,
+    fontSize: 13,
+    color: "#ffffff",
+    marginBottom: 10,
+  },
+  addKeyButton: {
+    backgroundColor: "transparent",
+    borderWidth: 1,
+    borderColor: "#54f4fc",
+    paddingVertical: 11,
     borderRadius: 4,
     alignItems: "center",
+    justifyContent: "center",
   },
-  buttonText: {
-    color: "#ffffff",
-    fontWeight: "bold",
-    fontSize: 14,
+  addKeyButtonText: {
+    color: "#54f4fc",
+    fontWeight: "800",
+    fontSize: 12,
+    letterSpacing: 1,
   },
-  sectionTitle: {
-    fontSize: 15,
-    fontWeight: "bold",
-    color: "#222222",
-    marginBottom: 8,
+  accountsHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 10,
+  },
+  sectionHeaderTitle: {
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 1.2,
+    color: "#94a3b8",
+  },
+  counterBadge: {
+    backgroundColor: "rgba(84, 244, 252, 0.15)",
+    paddingHorizontal: 8,
+    paddingVertical: 2,
+    borderRadius: 10,
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.3)",
+  },
+  counterBadgeText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#54f4fc",
+    fontFamily: "monospace",
+  },
+  listContent: {
+    paddingBottom: 24,
   },
   accountCard: {
+    backgroundColor: "#070c16",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.25)",
+    borderLeftWidth: 3,
+    borderLeftColor: "#54f4fc",
+    borderRadius: 6,
+    padding: 14,
+    marginBottom: 10,
+  },
+  accountTopRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: 12,
-    borderWidth: 1,
-    borderColor: "#e1e4e8",
-    borderRadius: 4,
-    marginBottom: 10,
-    backgroundColor: "#fcfcfc",
-  },
-  accountInfo: {
-    flex: 1,
+    marginBottom: 6,
   },
   accountName: {
     fontSize: 14,
-    fontWeight: "600",
-    color: "#333333",
-    marginBottom: 4,
+    fontWeight: "700",
+    color: "#ffffff",
+    flex: 1,
+    marginRight: 8,
   },
-  totpCode: {
-    fontSize: 26,
-    fontWeight: "bold",
-    letterSpacing: 3,
-    color: "#0969da",
-    marginBottom: 4,
+  protocolBadge: {
+    backgroundColor: "#0f172a",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 3,
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.1)",
   },
-  secretHint: {
-    fontSize: 11,
-    color: "#888888",
+  protocolBadgeText: {
+    fontSize: 9,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    color: "#94a3b8",
     fontFamily: "monospace",
   },
-  deleteButton: {
-    paddingVertical: 6,
-    paddingHorizontal: 12,
-    borderWidth: 1,
-    borderColor: "#cf222e",
-    borderRadius: 4,
-  },
-  deleteButtonText: {
-    color: "#cf222e",
-    fontSize: 12,
-    fontWeight: "bold",
-  },
-  emptyContainer: {
-    padding: 24,
-    alignItems: "center",
-  },
-  emptyText: {
-    fontSize: 15,
-    fontWeight: "bold",
-    color: "#555555",
-  },
-  emptySubText: {
-    fontSize: 13,
-    color: "#888888",
-    textAlign: "center",
-    marginTop: 4,
-  },
-  scannerModal: {
-    flex: 1,
-    backgroundColor: "#000000",
-  },
-  scannerHeader: {
+  tokenRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    padding: 16,
-    backgroundColor: "#111111",
+    marginVertical: 4,
   },
-  scannerTitle: {
-    color: "#ffffff",
-    fontSize: 16,
-    fontWeight: "bold",
+  totpToken: {
+    fontSize: 28,
+    fontWeight: "800",
+    letterSpacing: 4,
+    color: "#54f4fc",
+    fontFamily: "monospace",
   },
-  closeButton: {
-    padding: 6,
+  removeButton: {
+    paddingVertical: 5,
+    paddingHorizontal: 10,
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.5)",
+    borderRadius: 4,
   },
-  closeButtonText: {
-    color: "#ff4d4f",
-    fontWeight: "bold",
+  removeButtonText: {
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    color: "#ef4444",
+  },
+  secretHintText: {
+    fontSize: 10,
+    color: "#64748b",
+    fontFamily: "monospace",
+    letterSpacing: 0.5,
+    marginTop: 4,
+  },
+  emptyCard: {
+    backgroundColor: "#070c16",
+    borderWidth: 1,
+    borderStyle: "dashed",
+    borderColor: "rgba(84, 244, 252, 0.2)",
+    borderRadius: 6,
+    padding: 24,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  emptyBracket: {
+    width: 28,
+    height: 2,
+    backgroundColor: "#54f4fc",
+    marginBottom: 12,
+  },
+  emptyTitle: {
+    fontSize: 12,
+    fontWeight: "700",
+    letterSpacing: 1.2,
+    color: "#e2e8f0",
+    marginBottom: 6,
+  },
+  emptyDescription: {
+    fontSize: 12,
+    color: "#64748b",
+    textAlign: "center",
+    lineHeight: 18,
+  },
+  scannerContainer: {
+    flex: 1,
+    backgroundColor: "#000000",
+  },
+  scannerNavbar: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    paddingHorizontal: 16,
+    paddingVertical: 14,
+    backgroundColor: "#070c16",
+    borderBottomWidth: 1,
+    borderBottomColor: "rgba(84, 244, 252, 0.2)",
+  },
+  scannerNavTitle: {
     fontSize: 14,
+    fontWeight: "700",
+    color: "#ffffff",
+    letterSpacing: 0.5,
+  },
+  scannerNavSubtitle: {
+    fontSize: 11,
+    color: "#94a3b8",
+    marginTop: 2,
+  },
+  scannerCloseButton: {
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.4)",
+    paddingVertical: 6,
+    paddingHorizontal: 12,
+    borderRadius: 4,
+  },
+  scannerCloseButtonText: {
+    color: "#54f4fc",
+    fontWeight: "700",
+    fontSize: 11,
+    letterSpacing: 1,
+  },
+  cameraWrapper: {
+    flex: 1,
+    position: "relative",
   },
   cameraView: {
     flex: 1,
+  },
+  viewfinderOverlay: {
+    ...StyleSheet.absoluteFill,
+    alignItems: "center",
+    justifyContent: "center",
+    backgroundColor: "rgba(0, 0, 0, 0.35)",
+  },
+  viewfinderBox: {
+    width: 240,
+    height: 240,
+    position: "relative",
+  },
+  cornerBracket: {
+    position: "absolute",
+    width: 24,
+    height: 24,
+    borderColor: "#54f4fc",
+  },
+  topLeftBracket: {
+    top: 0,
+    left: 0,
+    borderTopWidth: 3,
+    borderLeftWidth: 3,
+  },
+  topRightBracket: {
+    top: 0,
+    right: 0,
+    borderTopWidth: 3,
+    borderRightWidth: 3,
+  },
+  bottomLeftBracket: {
+    bottom: 0,
+    left: 0,
+    borderBottomWidth: 3,
+    borderLeftWidth: 3,
+  },
+  bottomRightBracket: {
+    bottom: 0,
+    right: 0,
+    borderBottomWidth: 3,
+    borderRightWidth: 3,
+  },
+  viewfinderHint: {
+    marginTop: 20,
+    color: "#ffffff",
+    fontSize: 12,
+    fontWeight: "600",
+    backgroundColor: "rgba(0, 0, 0, 0.75)",
+    paddingHorizontal: 12,
+    paddingVertical: 6,
+    borderRadius: 4,
+    letterSpacing: 0.5,
+  },
+  cameraFallback: {
+    flex: 1,
+    justifyContent: "center",
+    alignItems: "center",
+  },
+  cameraFallbackText: {
+    color: "#94a3b8",
+    fontSize: 13,
   },
 });
