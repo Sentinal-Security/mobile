@@ -12,6 +12,7 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { generateTotp, getSecondsRemaining } from "@/utils/totp";
 
 interface TotpAccount {
@@ -21,6 +22,7 @@ interface TotpAccount {
 }
 
 const API_BASE_URL = "https://backend-pi68.onrender.com";
+const ACCOUNTS_STORAGE_KEY = "@sentinel_totp_accounts";
 
 interface PendingChallenge {
   id: number;
@@ -33,6 +35,7 @@ interface PendingChallenge {
 
 export default function AuthenticatorScreen() {
   const [accounts, setAccounts] = useState<TotpAccount[]>([]);
+  const [isLoaded, setIsLoaded] = useState(false);
   const [accountName, setAccountName] = useState("");
   const [secretKey, setSecretKey] = useState("");
   const [remainingSeconds, setRemainingSeconds] = useState(getSecondsRemaining());
@@ -41,6 +44,34 @@ export default function AuthenticatorScreen() {
 
   const [pendingChallenge, setPendingChallenge] = useState<PendingChallenge | null>(null);
   const [respondingChallenge, setRespondingChallenge] = useState(false);
+
+  // Load saved accounts from local storage on mount
+  useEffect(() => {
+    const loadSavedAccounts = async () => {
+      try {
+        const stored = await AsyncStorage.getItem(ACCOUNTS_STORAGE_KEY);
+        if (stored) {
+          const parsed = JSON.parse(stored);
+          if (Array.isArray(parsed)) {
+            setAccounts(parsed);
+          }
+        }
+      } catch (err) {
+        console.error("Failed to load accounts from storage:", err);
+      } finally {
+        setIsLoaded(true);
+      }
+    };
+    loadSavedAccounts();
+  }, []);
+
+  // Save accounts to local storage whenever accounts change
+  useEffect(() => {
+    if (!isLoaded) return;
+    AsyncStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(accounts)).catch((err) => {
+      console.error("Failed to persist accounts to storage:", err);
+    });
+  }, [accounts, isLoaded]);
 
   useEffect(() => {
     const timer = setInterval(() => {
