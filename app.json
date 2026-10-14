@@ -13,6 +13,7 @@
     },
     "android": {
       "package": "com.sentinal.security",
+      "googleServicesFile": "./google-services.json",
       "adaptiveIcon": {
         "backgroundColor": "#162232",
         "foregroundImage": "./assets/images/icon.png",
@@ -27,6 +28,13 @@
     "plugins": [
       "expo-router",
       "expo-camera",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/images/icon.png",
+          "color": "#54f4fc"
+        }
+      ],
       [
         "expo-splash-screen",
         {

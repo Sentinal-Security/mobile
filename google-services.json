@@ -1,0 +1,29 @@
+{
+  "project_info": {
+    "project_number": "762885210095",
+    "project_id": "sentinal-security-mfa",
+    "storage_bucket": "sentinal-security-mfa.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:762885210095:android:75ace63e1b2c222b09c01a",
+        "android_client_info": {
+          "package_name": "com.sentinal.security"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyBoUVQqJRW0e6iaIWBYF_1P8c_6LcQPBi8"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}

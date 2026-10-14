@@ -9,11 +9,24 @@ import {
   Alert,
   Image,
   Modal,
+  Platform,
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import AsyncStorage from "@react-native-async-storage/async-storage";
+import * as Notifications from "expo-notifications";
+import * as Device from "expo-device";
 import { generateTotp, getSecondsRemaining } from "@/utils/totp";
+
+Notifications.setNotificationHandler({
+  handleNotification: async () => ({
+    shouldShowAlert: true,
+    shouldPlaySound: true,
+    shouldSetBadge: true,
+    shouldShowBanner: true,
+    shouldShowList: true,
+  }),
+});
 
 interface TotpAccount {
   id: string;
@@ -44,6 +57,96 @@ export default function AuthenticatorScreen() {
 
   const [pendingChallenge, setPendingChallenge] = useState<PendingChallenge | null>(null);
   const [respondingChallenge, setRespondingChallenge] = useState(false);
+  const [pushToken, setPushToken] = useState<string | null>(null);
+
+  // Initialize Android Notification Channel and retrieve device push token
+  useEffect(() => {
+    async function configurePushAsync() {
+      if (Platform.OS === "android") {
+        await Notifications.setNotificationChannelAsync("mfa-alerts", {
+          name: "MFA Security Challenges",
+          importance: Notifications.AndroidImportance.MAX,
+          vibrationPattern: [0, 250, 250, 250],
+          lightColor: "#54f4fc",
+          sound: "default",
+        });
+      }
+
+      try {
+        const { status: existingStatus } = await Notifications.getPermissionsAsync();
+        let finalStatus = existingStatus;
+        if (existingStatus !== "granted") {
+          const { status } = await Notifications.requestPermissionsAsync();
+          finalStatus = status;
+        }
+        if (finalStatus !== "granted") {
+          return;
+        }
+
+        let token: string | null = null;
+        try {
+          const deviceTokenRes = await Notifications.getDevicePushTokenAsync();
+          token = deviceTokenRes.data;
+        } catch {
+          try {
+            const expoTokenRes = await Notifications.getExpoPushTokenAsync();
+            token = expoTokenRes.data;
+          } catch {}
+        }
+
+        if (token) {
+          setPushToken(token);
+        }
+      } catch (err) {
+        console.warn("Push token registration notice:", err);
+      }
+    }
+
+    configurePushAsync();
+  }, []);
+
+  // Sync device push token to backend for enrolled accounts
+  useEffect(() => {
+    if (!pushToken) return;
+
+    accounts.forEach((acc) => {
+      if (acc.name && acc.name.includes("@")) {
+        fetch(`${API_BASE_URL}/api/mfa/register-device`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ email: acc.name.trim().toLowerCase(), pushToken }),
+        }).catch(() => {});
+      }
+    });
+  }, [pushToken, accounts]);
+
+  // Handle tap on system push notification banner
+  useEffect(() => {
+    const responseSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
+      const data = response.notification.request.content.data;
+      if (data?.challengeId) {
+        const chId = Number(data.challengeId);
+        const matchCode = String(data.matchCode || "42");
+        const matchNum = parseInt(matchCode, 10) || 42;
+        const d1 = (((matchNum + 17) % 90) + 10).toString();
+        const d2 = (((matchNum + 43) % 90) + 10).toString();
+        const opts = [matchCode, d1, d2].sort(() => Math.random() - 0.5);
+
+        setPendingChallenge({
+          id: chId,
+          userId: Number(data.userId || 0),
+          email: String(data.email || ""),
+          matchCode,
+          clientOrigin: String(data.clientOrigin || "Sentinel Web Portal"),
+          options: opts,
+        });
+      }
+    });
+
+    return () => {
+      responseSubscription.remove();
+    };
+  }, []);
 
   // Load saved accounts from local storage on mount
   useEffect(() => {
@@ -116,6 +219,23 @@ export default function AuthenticatorScreen() {
               const d1 = (((matchNum + 17) % 90) + 10).toString();
               const d2 = (((matchNum + 43) % 90) + 10).toString();
               const opts = [ch.matchCode, d1, d2].sort(() => Math.random() - 0.5);
+
+              // Fire native Android system notification banner
+              Notifications.scheduleNotificationAsync({
+                content: {
+                  title: "Sentinel Security Sign-In Request",
+                  body: `Sign-in attempt for ${ch.email}. Select number ${ch.matchCode} on device.`,
+                  data: {
+                    challengeId: ch.id,
+                    matchCode: ch.matchCode,
+                    clientOrigin: ch.clientOrigin,
+                    email: ch.email,
+                  },
+                  sound: "default",
+                },
+                trigger: null,
+              }).catch(() => {});
+
               return {
                 id: ch.id,
                 userId: ch.userId,
