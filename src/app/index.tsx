@@ -106,17 +106,26 @@ export default function AuthenticatorScreen() {
     configurePushAsync();
   }, []);
 
-  // Sync device push token to backend for enrolled accounts
+  // Sync device push token to backend for enrolled accounts with cryptographic proof of possession
   useEffect(() => {
     if (!pushToken) return;
 
     accounts.forEach((acc) => {
-      if (acc.name && acc.name.includes("@")) {
-        fetch(`${API_BASE_URL}/api/mfa/register-device`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ email: acc.name.trim().toLowerCase(), pushToken }),
-        }).catch(() => {});
+      if (acc.name && acc.name.includes("@") && acc.secret) {
+        try {
+          const totpCode = generateTotp(acc.secret);
+          fetch(`${API_BASE_URL}/api/mfa/register-device`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              email: acc.name.trim().toLowerCase(),
+              pushToken,
+              totpCode,
+            }),
+          }).catch(() => {});
+        } catch {
+          // Ignore transient TOTP calculation issue during initial mount
+        }
       }
     });
   }, [pushToken, accounts]);
