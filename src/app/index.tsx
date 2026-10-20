@@ -16,6 +16,7 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
+import * as LocalAuthentication from "expo-local-authentication";
 import { generateTotp, getSecondsRemaining } from "@/utils/totp";
 import { recordMobileTelemetry } from "../../services/api";
 
@@ -274,6 +275,28 @@ export default function AuthenticatorScreen() {
 
   const handleRespondChallenge = async (action: "APPROVE" | "DENY", selectedCode?: string) => {
     if (!pendingChallenge) return;
+
+    if (action === "APPROVE") {
+      try {
+        const hasHardware = await LocalAuthentication.hasHardwareAsync();
+        const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+        if (hasHardware && isEnrolled) {
+          const authResult = await LocalAuthentication.authenticateAsync({
+            promptMessage: "Authenticate to Confirm Sign-In",
+            cancelLabel: "Cancel",
+            fallbackLabel: "Use Device PIN",
+            disableDeviceFallback: false,
+          });
+          if (!authResult.success) {
+            Alert.alert("Authentication Canceled", "Biometric or PIN verification is required to approve access.");
+            return;
+          }
+        }
+      } catch (err) {
+        console.warn("Local authentication bypassed or not available:", err);
+      }
+    }
+
     setRespondingChallenge(true);
     try {
       const res = await fetch(`${API_BASE_URL}/api/mfa/challenge/respond`, {
@@ -615,11 +638,30 @@ export default function AuthenticatorScreen() {
             </View>
 
             <View style={styles.pushDetailsBox}>
-              <Text style={styles.pushOriginLabel}>APPLICATION</Text>
+              <View style={styles.pushIdentityStatusRow}>
+                <Text style={styles.pushOriginLabel}>APPLICATION</Text>
+                {accounts.some((a) => a.name && pendingChallenge?.email && a.name.trim().toLowerCase() === pendingChallenge.email.trim().toLowerCase()) ? (
+                  <View style={styles.verifiedIdentityBadge}>
+                    <View style={styles.verifiedIdentityDot} />
+                    <Text style={styles.verifiedIdentityText}>ENROLLED VAULT IDENTITY</Text>
+                  </View>
+                ) : (
+                  <View style={styles.crossAccountWarningBadge}>
+                    <View style={styles.crossAccountWarningDot} />
+                    <Text style={styles.crossAccountWarningText}>UNENROLLED ACCOUNT</Text>
+                  </View>
+                )}
+              </View>
               <Text style={styles.pushOriginValue}>{pendingChallenge?.clientOrigin}</Text>
 
-              <Text style={styles.pushEmailLabel}>ACCOUNT</Text>
+              <Text style={styles.pushEmailLabel}>ACCOUNT IDENTITY</Text>
               <Text style={styles.pushEmailValue}>{pendingChallenge?.email}</Text>
+
+              {!accounts.some((a) => a.name && pendingChallenge?.email && a.name.trim().toLowerCase() === pendingChallenge.email.trim().toLowerCase()) && (
+                <Text style={styles.crossAccountNotice}>
+                  Notice: This request is for an account not stored in this device vault. Confirm identity before approving.
+                </Text>
+              )}
             </View>
 
             <Text style={styles.pushPromptText}>
@@ -1130,6 +1172,69 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     padding: 12,
     marginBottom: 16,
+  },
+  pushIdentityStatusRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 4,
+  },
+  verifiedIdentityBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(84, 244, 252, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.25)",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  verifiedIdentityDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: "#54f4fc",
+    marginRight: 4,
+  },
+  verifiedIdentityText: {
+    fontSize: 8,
+    fontWeight: "700",
+    color: "#54f4fc",
+    letterSpacing: 0.6,
+  },
+  crossAccountWarningBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(245, 158, 11, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.3)",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+  },
+  crossAccountWarningDot: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+    backgroundColor: "#f59e0b",
+    marginRight: 4,
+  },
+  crossAccountWarningText: {
+    fontSize: 8,
+    fontWeight: "700",
+    color: "#f59e0b",
+    letterSpacing: 0.6,
+  },
+  crossAccountNotice: {
+    marginTop: 8,
+    fontSize: 10,
+    color: "#fbbf24",
+    lineHeight: 14,
+    backgroundColor: "rgba(245, 158, 11, 0.08)",
+    padding: 6,
+    borderRadius: 4,
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.2)",
   },
   pushOriginLabel: {
     fontSize: 9,
