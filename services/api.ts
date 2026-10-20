@@ -53,3 +53,28 @@ export async function disableMfa(userId: number): Promise<AuthResponse> {
   });
   return res.json();
 }
+
+export async function recordMobileTelemetry(payload: {
+  userId?: number;
+  userEmail?: string;
+  actionType: string;
+  category?: string;
+  severity?: string;
+  targetResource?: string;
+  details?: string;
+}): Promise<void> {
+  try {
+    await fetch(`${API_BASE_URL}/api/audit/event`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        ...payload,
+        category: payload.category || "USER_TELEMETRY",
+        severity: payload.severity || "INFO",
+        targetResource: payload.targetResource || "Mobile Android Authenticator",
+      }),
+    });
+  } catch {
+    // Fire and forget
+  }
+}

@@ -17,6 +17,7 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
 import { generateTotp, getSecondsRemaining } from "@/utils/totp";
+import { recordMobileTelemetry } from "../../services/api";
 
 Notifications.setNotificationHandler({
   handleNotification: async () => ({
@@ -312,6 +313,11 @@ export default function AuthenticatorScreen() {
     setAccountName("");
     setSecretKey("");
     setShowScanner(false);
+    recordMobileTelemetry({
+      actionType: "ENROLL_KEY_MANUAL",
+      details: "User manually enrolled 2FA key for " + cleanName,
+      userEmail: cleanName,
+    });
   };
 
   const confirmDeleteAccount = (id: string, name: string) => {
@@ -323,7 +329,15 @@ export default function AuthenticatorScreen() {
         {
           text: "Remove",
           style: "destructive",
-          onPress: () => setAccounts((prev) => prev.filter((acc) => acc.id !== id)),
+          onPress: () => {
+            setAccounts((prev) => prev.filter((acc) => acc.id !== id));
+            recordMobileTelemetry({
+              actionType: "REMOVE_KEY",
+              details: "User deleted enrolled 2FA key for " + name,
+              userEmail: name,
+              severity: "WARN",
+            });
+          },
         },
       ]
     );
@@ -341,6 +355,10 @@ export default function AuthenticatorScreen() {
       }
     }
     setShowScanner(true);
+    recordMobileTelemetry({
+      actionType: "OPEN_SCANNER",
+      details: "User opened QR code camera scanner",
+    });
   };
 
   const handleBarcodeScanned = ({ data }: { data: string }) => {
@@ -633,7 +651,7 @@ const styles = StyleSheet.create({
     flex: 1,
     paddingHorizontal: 16,
     paddingTop: 12,
-    backgroundColor: "#000000",
+    backgroundColor: "#050811",
   },
   headerContainer: {
     marginBottom: 16,
@@ -689,9 +707,9 @@ const styles = StyleSheet.create({
   timerCard: {
     backgroundColor: "#070c16",
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.2)",
-    borderRadius: 6,
-    padding: 10,
+    borderColor: "rgba(84, 244, 252, 0.18)",
+    borderRadius: 8,
+    padding: 12,
     marginBottom: 16,
   },
   timerHeaderRow: {
@@ -726,8 +744,8 @@ const styles = StyleSheet.create({
   enrollmentCard: {
     backgroundColor: "#070c16",
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.2)",
-    borderRadius: 6,
+    borderColor: "rgba(84, 244, 252, 0.18)",
+    borderRadius: 8,
     padding: 14,
     marginBottom: 16,
   },
@@ -743,7 +761,7 @@ const styles = StyleSheet.create({
   primaryScanButton: {
     backgroundColor: "#54f4fc",
     paddingVertical: 12,
-    borderRadius: 4,
+    borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -771,10 +789,10 @@ const styles = StyleSheet.create({
     marginHorizontal: 8,
   },
   inputField: {
-    backgroundColor: "#030712",
+    backgroundColor: "#0b1120",
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.25)",
-    borderRadius: 4,
+    borderColor: "rgba(84, 244, 252, 0.2)",
+    borderRadius: 8,
     paddingHorizontal: 12,
     paddingVertical: 10,
     fontSize: 13,
@@ -786,7 +804,7 @@ const styles = StyleSheet.create({
     borderWidth: 1,
     borderColor: "#54f4fc",
     paddingVertical: 11,
-    borderRadius: 4,
+    borderRadius: 8,
     alignItems: "center",
     justifyContent: "center",
   },
@@ -828,10 +846,10 @@ const styles = StyleSheet.create({
   accountCard: {
     backgroundColor: "#070c16",
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.25)",
+    borderColor: "rgba(84, 244, 252, 0.2)",
     borderLeftWidth: 3,
     borderLeftColor: "#54f4fc",
-    borderRadius: 6,
+    borderRadius: 8,
     padding: 14,
     marginBottom: 10,
   },
@@ -852,7 +870,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#0f172a",
     paddingHorizontal: 6,
     paddingVertical: 2,
-    borderRadius: 3,
+    borderRadius: 4,
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.1)",
   },
@@ -877,11 +895,12 @@ const styles = StyleSheet.create({
     fontFamily: "monospace",
   },
   removeButton: {
-    paddingVertical: 5,
+    paddingVertical: 6,
     paddingHorizontal: 10,
     borderWidth: 1,
-    borderColor: "rgba(239, 68, 68, 0.5)",
-    borderRadius: 4,
+    borderColor: "rgba(239, 68, 68, 0.4)",
+    backgroundColor: "rgba(239, 68, 68, 0.05)",
+    borderRadius: 6,
   },
   removeButtonText: {
     fontSize: 10,
@@ -1067,9 +1086,9 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 380,
     backgroundColor: "#070c16",
-    borderWidth: 2,
+    borderWidth: 1.5,
     borderColor: "#54f4fc",
-    borderRadius: 8,
+    borderRadius: 12,
     padding: 20,
     shadowColor: "#54f4fc",
     shadowOffset: { width: 0, height: 4 },
@@ -1099,7 +1118,7 @@ const styles = StyleSheet.create({
     backgroundColor: "#0b1322",
     borderWidth: 1,
     borderColor: "rgba(84, 244, 252, 0.15)",
-    borderRadius: 6,
+    borderRadius: 8,
     padding: 12,
     marginBottom: 16,
   },
@@ -1147,7 +1166,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(84, 244, 252, 0.08)",
     borderWidth: 1.5,
     borderColor: "#54f4fc",
-    borderRadius: 6,
+    borderRadius: 8,
     paddingVertical: 14,
     alignItems: "center",
     justifyContent: "center",
@@ -1163,7 +1182,7 @@ const styles = StyleSheet.create({
     borderColor: "#ef4444",
     backgroundColor: "rgba(239, 68, 68, 0.08)",
     paddingVertical: 12,
-    borderRadius: 4,
+    borderRadius: 8,
     alignItems: "center",
   },
   denyButtonText: {
