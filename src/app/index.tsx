@@ -17,18 +17,30 @@ import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
 import * as Device from "expo-device";
 import * as LocalAuthentication from "expo-local-authentication";
+import * as SplashScreen from "expo-splash-screen";
 import { generateTotp, getSecondsRemaining } from "@/utils/totp";
 import { recordMobileTelemetry } from "../../services/api";
 
-Notifications.setNotificationHandler({
-  handleNotification: async () => ({
-    shouldShowAlert: true,
-    shouldPlaySound: true,
-    shouldSetBadge: true,
-    shouldShowBanner: true,
-    shouldShowList: true,
-  }),
-});
+try {
+  Notifications.setNotificationHandler({
+    handleNotification: async () => ({
+      shouldShowAlert: true,
+      shouldPlaySound: true,
+      shouldSetBadge: true,
+      shouldShowBanner: true,
+      shouldShowList: true,
+    }),
+  });
+} catch (handlerErr) {
+  console.warn("Notifications handler initialization notice:", handlerErr);
+}
+
+async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  return Promise.race([
+    promise,
+    new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
+  ]);
+}
 
 interface TotpAccount {
   id: string;
@@ -61,50 +73,68 @@ export default function AuthenticatorScreen() {
   const [respondingChallenge, setRespondingChallenge] = useState(false);
   const [pushToken, setPushToken] = useState<string | null>(null);
 
-  // Initialize Android Notification Channel and retrieve device push token
+  // Initialize Android Notification Channel and retrieve device push token defensively
   useEffect(() => {
-    async function configurePushAsync() {
-      if (Platform.OS === "android") {
-        await Notifications.setNotificationChannelAsync("mfa-alerts", {
-          name: "MFA Security Challenges",
-          importance: Notifications.AndroidImportance.MAX,
-          vibrationPattern: [0, 250, 250, 250],
-          lightColor: "#54f4fc",
-          sound: "default",
-        });
-      }
-
+    let isCancelled = false;
+    const configurePushTimer = setTimeout(async () => {
       try {
-        const { status: existingStatus } = await Notifications.getPermissionsAsync();
-        let finalStatus = existingStatus;
-        if (existingStatus !== "granted") {
-          const { status } = await Notifications.requestPermissionsAsync();
-          finalStatus = status;
+        if (Platform.OS === "android") {
+          try {
+            await Notifications.setNotificationChannelAsync("mfa-alerts", {
+              name: "MFA Security Challenges",
+              importance: Notifications.AndroidImportance.MAX,
+              vibrationPattern: [0, 250, 250, 250],
+              lightColor: "#54f4fc",
+              sound: "default",
+            });
+          } catch (chErr) {
+            console.warn("Notification channel setup notice:", chErr);
+          }
         }
+
+        const permissions = await withTimeout(Notifications.getPermissionsAsync(), 2000);
+        let finalStatus = permissions?.status;
         if (finalStatus !== "granted") {
+          const reqRes = await withTimeout(Notifications.requestPermissionsAsync(), 3000);
+          finalStatus = reqRes?.status;
+        }
+        if (finalStatus !== "granted" || isCancelled) {
           return;
         }
 
         let token: string | null = null;
         try {
-          const deviceTokenRes = await Notifications.getDevicePushTokenAsync();
-          token = deviceTokenRes.data;
+          const deviceTokenRes = await withTimeout(Notifications.getDevicePushTokenAsync(), 3000);
+          if (deviceTokenRes && deviceTokenRes.data) {
+            token = deviceTokenRes.data;
+          }
         } catch {
-          try {
-            const expoTokenRes = await Notifications.getExpoPushTokenAsync();
-            token = expoTokenRes.data;
-          } catch {}
+          // Device push token fallback
         }
 
-        if (token) {
+        if (!token && !isCancelled) {
+          try {
+            const expoTokenRes = await withTimeout(Notifications.getExpoPushTokenAsync(), 3000);
+            if (expoTokenRes && expoTokenRes.data) {
+              token = expoTokenRes.data;
+            }
+          } catch {
+            // Expo push token fallback
+          }
+        }
+
+        if (token && !isCancelled) {
           setPushToken(token);
         }
       } catch (err) {
         console.warn("Push token registration notice:", err);
       }
-    }
+    }, 1200);
 
-    configurePushAsync();
+    return () => {
+      isCancelled = true;
+      clearTimeout(configurePushTimer);
+    };
   }, []);
 
   // Sync device push token to backend for enrolled accounts with cryptographic proof of possession
@@ -115,6 +145,8 @@ export default function AuthenticatorScreen() {
       if (acc.name && acc.name.includes("@") && acc.secret) {
         try {
           const totpCode = generateTotp(acc.secret);
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 4000);
           fetch(`${API_BASE_URL}/api/mfa/register-device`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
@@ -123,9 +155,12 @@ export default function AuthenticatorScreen() {
               pushToken,
               totpCode,
             }),
-          }).catch(() => {});
+            signal: controller.signal,
+          })
+            .then(() => clearTimeout(timer))
+            .catch(() => clearTimeout(timer));
         } catch {
-          // Ignore transient TOTP calculation issue during initial mount
+          // Ignore transient TOTP calculation issue during mount
         }
       }
     });
@@ -133,38 +168,44 @@ export default function AuthenticatorScreen() {
 
   // Handle tap on system push notification banner
   useEffect(() => {
-    const responseSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
-      const data = response.notification.request.content.data;
-      if (data?.challengeId) {
-        const chId = Number(data.challengeId);
-        const matchCode = String(data.matchCode || "42");
-        const matchNum = parseInt(matchCode, 10) || 42;
-        const d1 = (((matchNum + 17) % 90) + 10).toString();
-        const d2 = (((matchNum + 43) % 90) + 10).toString();
-        const opts = [matchCode, d1, d2].sort(() => Math.random() - 0.5);
+    let responseSubscription: Notifications.Subscription | null = null;
+    try {
+      responseSubscription = Notifications.addNotificationResponseReceivedListener((response) => {
+        const data = response?.notification?.request?.content?.data;
+        if (data?.challengeId) {
+          const chId = Number(data.challengeId);
+          const matchCode = String(data.matchCode || "42");
+          const matchNum = parseInt(matchCode, 10) || 42;
+          const d1 = (((matchNum + 17) % 90) + 10).toString();
+          const d2 = (((matchNum + 43) % 90) + 10).toString();
+          const opts = [matchCode, d1, d2].sort(() => Math.random() - 0.5);
 
-        setPendingChallenge({
-          id: chId,
-          userId: Number(data.userId || 0),
-          email: String(data.email || ""),
-          matchCode,
-          clientOrigin: String(data.clientOrigin || "Sentinel Web Portal"),
-          options: opts,
-        });
-      }
-    });
+          setPendingChallenge({
+            id: chId,
+            userId: Number(data.userId || 0),
+            email: String(data.email || ""),
+            matchCode,
+            clientOrigin: String(data.clientOrigin || "Sentinel Web Portal"),
+            options: opts,
+          });
+        }
+      });
+    } catch (err) {
+      console.warn("Notification listener registration notice:", err);
+    }
 
     return () => {
-      responseSubscription.remove();
+      responseSubscription?.remove();
     };
   }, []);
 
   // Load saved accounts from local storage on mount
   useEffect(() => {
+    let isMounted = true;
     const loadSavedAccounts = async () => {
       try {
         const stored = await AsyncStorage.getItem(ACCOUNTS_STORAGE_KEY);
-        if (stored) {
+        if (stored && isMounted) {
           const parsed = JSON.parse(stored);
           if (Array.isArray(parsed)) {
             setAccounts(parsed);
@@ -173,10 +214,17 @@ export default function AuthenticatorScreen() {
       } catch (err) {
         console.error("Failed to load accounts from storage:", err);
       } finally {
-        setIsLoaded(true);
+        if (isMounted) {
+          setIsLoaded(true);
+        }
+        SplashScreen.hideAsync().catch(() => {});
       }
     };
     loadSavedAccounts();
+
+    return () => {
+      isMounted = false;
+    };
   }, []);
 
   // Save accounts to local storage whenever accounts change
@@ -195,12 +243,14 @@ export default function AuthenticatorScreen() {
     return () => clearInterval(timer);
   }, []);
 
-  // Poll for active push verification challenges
+  // Poll for active push verification challenges with timeout protection
   useEffect(() => {
+    if (!isLoaded) return;
+
     let isMounted = true;
+    let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     const checkPendingChallenges = async () => {
-      // Gather emails to check: enrolled accounts, or currently typed accountName
       const emailsToCheck = new Set<string>();
       accounts.forEach((acc) => {
         if (acc.name && acc.name.includes("@")) {
@@ -214,10 +264,15 @@ export default function AuthenticatorScreen() {
       if (emailsToCheck.size === 0) return;
 
       for (const email of emailsToCheck) {
+        if (!isMounted) return;
         try {
+          const controller = new AbortController();
+          const timer = setTimeout(() => controller.abort(), 4000);
           const res = await fetch(
-            `${API_BASE_URL}/api/mfa/challenge/pending?email=${encodeURIComponent(email)}`
+            `${API_BASE_URL}/api/mfa/challenge/pending?email=${encodeURIComponent(email)}`,
+            { signal: controller.signal }
           );
+          clearTimeout(timer);
           if (!res.ok) continue;
           const json = await res.json();
           if (json.success && json.data?.hasPending && json.data.challenge) {
@@ -231,21 +286,25 @@ export default function AuthenticatorScreen() {
               const d2 = (((matchNum + 43) % 90) + 10).toString();
               const opts = [ch.matchCode, d1, d2].sort(() => Math.random() - 0.5);
 
-              // Fire native Android system notification banner
-              Notifications.scheduleNotificationAsync({
-                content: {
-                  title: "Sentinel Security Sign-In Request",
-                  body: `Sign-in attempt for ${ch.email}. Select number ${ch.matchCode} on device.`,
-                  data: {
-                    challengeId: ch.id,
-                    matchCode: ch.matchCode,
-                    clientOrigin: ch.clientOrigin,
-                    email: ch.email,
+              // Fire native Android system notification banner safely
+              try {
+                Notifications.scheduleNotificationAsync({
+                  content: {
+                    title: "Sentinel Security Sign-In Request",
+                    body: `Sign-in attempt for ${ch.email}. Select number ${ch.matchCode} on device.`,
+                    data: {
+                      challengeId: ch.id,
+                      matchCode: ch.matchCode,
+                      clientOrigin: ch.clientOrigin,
+                      email: ch.email,
+                    },
+                    sound: "default",
                   },
-                  sound: "default",
-                },
-                trigger: null,
-              }).catch(() => {});
+                  trigger: null,
+                }).catch(() => {});
+              } catch {
+                // Ignore notification trigger notice
+              }
 
               return {
                 id: ch.id,
@@ -259,19 +318,26 @@ export default function AuthenticatorScreen() {
             break;
           }
         } catch {
-          // Ignore network errors during polling
+          // Ignore network errors or aborted requests during polling
         }
       }
     };
 
-    checkPendingChallenges();
-    const pollInterval = setInterval(checkPendingChallenges, 3000);
+    // Stagger polling by 1500ms so initial screen mount finishes smoothly
+    const initialTimer = setTimeout(() => {
+      if (!isMounted) return;
+      checkPendingChallenges();
+      pollInterval = setInterval(checkPendingChallenges, 4000);
+    }, 1500);
 
     return () => {
       isMounted = false;
-      clearInterval(pollInterval);
+      clearTimeout(initialTimer);
+      if (pollInterval) {
+        clearInterval(pollInterval);
+      }
     };
-  }, [accounts, accountName]);
+  }, [accounts, accountName, isLoaded]);
 
   const handleRespondChallenge = async (action: "APPROVE" | "DENY", selectedCode?: string) => {
     if (!pendingChallenge) return;
@@ -533,7 +599,12 @@ export default function AuthenticatorScreen() {
         keyExtractor={(item) => item.id}
         contentContainerStyle={styles.listContent}
         renderItem={({ item }) => {
-          const code = generateTotp(item.secret);
+          let code = "------";
+          try {
+            code = generateTotp(item.secret);
+          } catch {
+            code = "------";
+          }
           const formattedCode =
             code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
 

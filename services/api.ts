@@ -64,6 +64,8 @@ export async function recordMobileTelemetry(payload: {
   details?: string;
 }): Promise<void> {
   try {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), 3000);
     await fetch(`${API_BASE_URL}/api/audit/event`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -73,7 +75,9 @@ export async function recordMobileTelemetry(payload: {
         severity: payload.severity || "INFO",
         targetResource: payload.targetResource || "Mobile Android Authenticator",
       }),
+      signal: controller.signal,
     });
+    clearTimeout(timer);
   } catch {
     // Fire and forget
   }
