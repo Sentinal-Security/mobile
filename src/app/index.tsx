@@ -13,13 +13,19 @@ import {
 } from "react-native";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import * as Notifications from "expo-notifications";
-import * as Device from "expo-device";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as SplashScreen from "expo-splash-screen";
 import { generateTotp, getSecondsRemaining } from "@/utils/totp";
 import { recordMobileTelemetry } from "../../services/api";
+import {
+  TotpAccount,
+  isHardwareVaultAvailable,
+  loadAccountsFromVault,
+  saveAccountsToVault,
+  loadVaultSettings,
+  saveVaultSettings,
+} from "@/utils/vault";
 
 try {
   Notifications.setNotificationHandler({
@@ -42,14 +48,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null
   ]);
 }
 
-interface TotpAccount {
-  id: string;
-  name: string;
-  secret: string;
-}
-
 const API_BASE_URL = "https://backend-pi68.onrender.com";
-const ACCOUNTS_STORAGE_KEY = "@sentinel_totp_accounts";
 
 interface PendingChallenge {
   id: number;
@@ -63,17 +62,32 @@ interface PendingChallenge {
 export default function AuthenticatorScreen() {
   const [accounts, setAccounts] = useState<TotpAccount[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [isHardwareVault, setIsHardwareVault] = useState<boolean | null>(null);
+
+  // Biometric Inherence Factor State
+  const [hasBiometricHardware, setHasBiometricHardware] = useState(false);
+  const [biometricEnrolled, setBiometricEnrolled] = useState(false);
+  const [requireBiometrics, setRequireBiometrics] = useState(true);
+  const [isVaultUnlocked, setIsVaultUnlocked] = useState(false);
+
+  // Enrollment State (Camera vs Manual Segmented Mode)
+  const [enrollmentTab, setEnrollmentTab] = useState<"SCAN" | "MANUAL">("SCAN");
   const [accountName, setAccountName] = useState("");
+  const [accountIssuer, setAccountIssuer] = useState("");
   const [secretKey, setSecretKey] = useState("");
+  const [manualValidationError, setManualValidationError] = useState<string | null>(null);
+
+  // TOTP Clock and Scanner
   const [remainingSeconds, setRemainingSeconds] = useState(getSecondsRemaining());
   const [showScanner, setShowScanner] = useState(false);
   const [permission, requestPermission] = useCameraPermissions();
 
+  // Out-of-band Push Challenge
   const [pendingChallenge, setPendingChallenge] = useState<PendingChallenge | null>(null);
   const [respondingChallenge, setRespondingChallenge] = useState(false);
   const [pushToken, setPushToken] = useState<string | null>(null);
 
-  // Initialize Android Notification Channel and retrieve device push token defensively
+  // Initialize Android Notification Channel and retrieve device push token
   useEffect(() => {
     let isCancelled = false;
     const configurePushTimer = setTimeout(async () => {
@@ -137,7 +151,7 @@ export default function AuthenticatorScreen() {
     };
   }, []);
 
-  // Sync device push token to backend for enrolled accounts with cryptographic proof of possession
+  // Sync device push token to backend for enrolled accounts with proof of possession
   useEffect(() => {
     if (!pushToken) return;
 
@@ -160,7 +174,7 @@ export default function AuthenticatorScreen() {
             .then(() => clearTimeout(timer))
             .catch(() => clearTimeout(timer));
         } catch {
-          // Ignore transient TOTP calculation issue during mount
+          // Ignore transient TOTP calculation notice during mount
         }
       }
     });
@@ -199,20 +213,38 @@ export default function AuthenticatorScreen() {
     };
   }, []);
 
-  // Load saved accounts from local storage on mount
+  // Initialize hardware vault, biometrics status, and load encrypted accounts on mount
   useEffect(() => {
     let isMounted = true;
-    const loadSavedAccounts = async () => {
+    const initializeVault = async () => {
       try {
-        const stored = await AsyncStorage.getItem(ACCOUNTS_STORAGE_KEY);
-        if (stored && isMounted) {
-          const parsed = JSON.parse(stored);
-          if (Array.isArray(parsed)) {
-            setAccounts(parsed);
+        const isHwAvailable = await isHardwareVaultAvailable();
+        if (isMounted) setIsHardwareVault(isHwAvailable);
+
+        const hasHw = await LocalAuthentication.hasHardwareAsync();
+        const isEnr = await LocalAuthentication.isEnrolledAsync();
+        if (isMounted) {
+          setHasBiometricHardware(hasHw);
+          setBiometricEnrolled(isEnr);
+        }
+
+        const settings = await loadVaultSettings();
+        if (isMounted) {
+          setRequireBiometrics(settings.requireBiometrics);
+          // If biometric hardware or enrollment is missing, auto-unlock vault
+          if (!settings.requireBiometrics || !hasHw || !isEnr) {
+            setIsVaultUnlocked(true);
+          } else {
+            setIsVaultUnlocked(false);
           }
         }
+
+        const storedAccounts = await loadAccountsFromVault();
+        if (isMounted) {
+          setAccounts(storedAccounts);
+        }
       } catch (err) {
-        console.error("Failed to load accounts from storage:", err);
+        console.error("Failed to initialize security vault:", err);
       } finally {
         if (isMounted) {
           setIsLoaded(true);
@@ -220,21 +252,23 @@ export default function AuthenticatorScreen() {
         SplashScreen.hideAsync().catch(() => {});
       }
     };
-    loadSavedAccounts();
+
+    initializeVault();
 
     return () => {
       isMounted = false;
     };
   }, []);
 
-  // Save accounts to local storage whenever accounts change
+  // Persist accounts to hardware KeyStore whenever accounts change
   useEffect(() => {
     if (!isLoaded) return;
-    AsyncStorage.setItem(ACCOUNTS_STORAGE_KEY, JSON.stringify(accounts)).catch((err) => {
-      console.error("Failed to persist accounts to storage:", err);
+    saveAccountsToVault(accounts).catch((err) => {
+      console.error("Failed to persist accounts to vault:", err);
     });
   }, [accounts, isLoaded]);
 
+  // Synchronized 1-second TOTP clock tick
   useEffect(() => {
     const timer = setInterval(() => {
       setRemainingSeconds(getSecondsRemaining());
@@ -286,7 +320,7 @@ export default function AuthenticatorScreen() {
               const d2 = (((matchNum + 43) % 90) + 10).toString();
               const opts = [ch.matchCode, d1, d2].sort(() => Math.random() - 0.5);
 
-              // Fire native Android system notification banner safely
+              // Schedule native Android system notification banner safely
               try {
                 Notifications.scheduleNotificationAsync({
                   content: {
@@ -323,7 +357,6 @@ export default function AuthenticatorScreen() {
       }
     };
 
-    // Stagger polling by 1500ms so initial screen mount finishes smoothly
     const initialTimer = setTimeout(() => {
       if (!isMounted) return;
       checkPendingChallenges();
@@ -339,6 +372,64 @@ export default function AuthenticatorScreen() {
     };
   }, [accounts, accountName, isLoaded]);
 
+  // Authenticate with device biometrics or PIN to unlock TOTP codes
+  const handleUnlockVault = async () => {
+    try {
+      const hasHw = await LocalAuthentication.hasHardwareAsync();
+      const isEnr = await LocalAuthentication.isEnrolledAsync();
+
+      if (!hasHw || !isEnr) {
+        setIsVaultUnlocked(true);
+        return;
+      }
+
+      const result = await LocalAuthentication.authenticateAsync({
+        promptMessage: "Authenticate to View TOTP Passcodes",
+        cancelLabel: "Cancel",
+        fallbackLabel: "Use Device PIN",
+        disableDeviceFallback: false,
+      });
+
+      if (result.success) {
+        setIsVaultUnlocked(true);
+        recordMobileTelemetry({
+          actionType: "BIOMETRIC_VAULT_UNLOCK_SUCCESS",
+          details: "User verified biometric inherence to view TOTP codes",
+        });
+      } else {
+        Alert.alert(
+          "Authentication Required",
+          "Biometric or device PIN verification is required to unlock security passcodes."
+        );
+      }
+    } catch (err) {
+      console.warn("Biometric verification notice:", err);
+      setIsVaultUnlocked(true);
+    }
+  };
+
+  // Re-lock vault
+  const handleLockVault = () => {
+    setIsVaultUnlocked(false);
+  };
+
+  // Toggle biometric enforcement preference
+  const handleToggleBiometrics = async () => {
+    const nextVal = !requireBiometrics;
+    setRequireBiometrics(nextVal);
+    if (!nextVal) {
+      setIsVaultUnlocked(true);
+    } else {
+      setIsVaultUnlocked(false);
+    }
+    await saveVaultSettings({ requireBiometrics: nextVal });
+    recordMobileTelemetry({
+      actionType: "BIOMETRIC_PREFERENCE_CHANGED",
+      details: `Biometric lock policy set to ${nextVal ? "ENFORCED" : "DISABLED"}`,
+    });
+  };
+
+  // Handle push approval with biometric verification gate
   const handleRespondChallenge = async (action: "APPROVE" | "DENY", selectedCode?: string) => {
     if (!pendingChallenge) return;
 
@@ -392,12 +483,36 @@ export default function AuthenticatorScreen() {
     }
   };
 
-  const handleAddAccount = (name?: string, secret?: string) => {
+  // Secret key input validator
+  const handleSecretKeyChange = (text: string) => {
+    const clean = text.toUpperCase().replace(/\s+/g, "");
+    setSecretKey(clean);
+
+    if (clean.length > 0) {
+      if (!/^[A-Z2-7]+=*$/.test(clean)) {
+        setManualValidationError("Base32 keys must only contain letters A-Z and digits 2-7.");
+      } else if (clean.length < 8) {
+        setManualValidationError("Base32 keys must be at least 8 characters long.");
+      } else {
+        setManualValidationError(null);
+      }
+    } else {
+      setManualValidationError(null);
+    }
+  };
+
+  const handleAddAccount = (name?: string, secret?: string, issuer?: string) => {
     const cleanName = (name || accountName).trim();
     const cleanSecret = (secret || secretKey).trim().toUpperCase().replace(/\s+/g, "");
+    const cleanIssuer = (issuer || accountIssuer).trim();
 
     if (!cleanName || !cleanSecret) {
       Alert.alert("Input Error", "Both Account Name and Secret Key are required.");
+      return;
+    }
+
+    if (!/^[A-Z2-7]+=*$/.test(cleanSecret) || cleanSecret.length < 8) {
+      Alert.alert("Invalid Key", "Secret Key must be a valid Base32 string (A-Z, 2-7, min 8 characters).");
       return;
     }
 
@@ -405,23 +520,29 @@ export default function AuthenticatorScreen() {
       id: Date.now().toString(),
       name: cleanName,
       secret: cleanSecret,
+      issuer: cleanIssuer || undefined,
+      createdAt: Date.now(),
     };
 
     setAccounts((prev) => [newAccount, ...prev]);
     setAccountName("");
+    setAccountIssuer("");
     setSecretKey("");
+    setManualValidationError(null);
     setShowScanner(false);
+
     recordMobileTelemetry({
       actionType: "ENROLL_KEY_MANUAL",
-      details: "User manually enrolled 2FA key for " + cleanName,
+      details: `User enrolled 2FA key for ${cleanName}${cleanIssuer ? ` (${cleanIssuer})` : ""}`,
       userEmail: cleanName,
     });
   };
 
-  const confirmDeleteAccount = (id: string, name: string) => {
+  const confirmDeleteAccount = (id: string, name: string, issuer?: string) => {
+    const displayName = issuer ? `${issuer} (${name})` : name;
     Alert.alert(
       "Remove Account",
-      `Are you sure you want to remove ${name}? This will delete the 2FA key from this device.`,
+      `Are you sure you want to remove ${displayName}? This will delete the 2FA key from the hardware vault.`,
       [
         { text: "Cancel", style: "cancel" },
         {
@@ -431,7 +552,7 @@ export default function AuthenticatorScreen() {
             setAccounts((prev) => prev.filter((acc) => acc.id !== id));
             recordMobileTelemetry({
               actionType: "REMOVE_KEY",
-              details: "User deleted enrolled 2FA key for " + name,
+              details: `User deleted enrolled 2FA key for ${displayName}`,
               userEmail: name,
               severity: "WARN",
             });
@@ -466,6 +587,7 @@ export default function AuthenticatorScreen() {
     if (data.startsWith("otpauth://")) {
       let secret = "";
       let name = "";
+      let issuer = "";
 
       const secretMatch = data.match(/[?&]secret=([A-Za-z2-7]+)/i);
       if (secretMatch && secretMatch[1]) {
@@ -473,13 +595,16 @@ export default function AuthenticatorScreen() {
       }
 
       const issuerMatch = data.match(/[?&]issuer=([^&]+)/i);
-      const issuer = issuerMatch ? decodeURIComponent(issuerMatch[1]) : "";
+      if (issuerMatch) {
+        issuer = decodeURIComponent(issuerMatch[1]);
+      }
 
       const labelMatch = data.match(/otpauth:\/\/totp\/([^?]+)/i);
       if (labelMatch && labelMatch[1]) {
         const rawLabel = decodeURIComponent(labelMatch[1]);
         if (rawLabel.includes(":")) {
           const parts = rawLabel.split(":");
+          if (!issuer) issuer = parts[0];
           name = parts[1] || parts[0];
         } else {
           name = rawLabel;
@@ -491,7 +616,7 @@ export default function AuthenticatorScreen() {
       }
 
       if (secret) {
-        handleAddAccount(name || "Sentinel Account", secret);
+        handleAddAccount(name || "Sentinel Account", secret, issuer);
         Alert.alert("Account Paired", `Successfully enrolled 2FA for ${name || "Sentinel Account"}`);
         return;
       }
@@ -500,7 +625,7 @@ export default function AuthenticatorScreen() {
     // Direct Base32 key fallback
     const cleanSecret = data.trim().toUpperCase().replace(/\s+/g, "");
     if (cleanSecret.length >= 8 && /^[A-Z2-7]+$/.test(cleanSecret)) {
-      handleAddAccount("Enrolled Account", cleanSecret);
+      handleAddAccount("Enrolled Account", cleanSecret, "Sentinel IAM");
       Alert.alert("Account Paired", "Successfully enrolled 2FA secret key from QR code.");
     } else {
       Alert.alert("Invalid QR Code", "Scanned code does not contain a valid Base32 2FA secret.");
@@ -512,7 +637,7 @@ export default function AuthenticatorScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Enterprise Header with Sentinel Bracket Accent */}
+      {/* Enterprise Header with Hardware Vault and Biometric Badges */}
       <View style={styles.headerContainer}>
         <View style={styles.headerLeft}>
           <Image
@@ -527,13 +652,69 @@ export default function AuthenticatorScreen() {
             </View>
             <Text style={styles.headerTitle}>Authenticator</Text>
             <Text style={styles.headerSubtitle}>RFC 6238 Standard 6-Digit TOTP</Text>
-            <View style={styles.pushStatusBadge}>
-              <View style={styles.pushActivePulse} />
-              <Text style={styles.pushStatusText}>PUSH ACTIVE</Text>
+
+            {/* Hardware Vault, Biometric, and Push Status Pills */}
+            <View style={styles.systemStatusRow}>
+              <View style={styles.statusPill}>
+                <View style={[styles.statusDotSmall, isHardwareVault ? styles.dotCyan : styles.dotSlate]} />
+                <Text style={styles.statusPillText}>
+                  {isHardwareVault ? "KEYSTORE: AES-256" : "STORAGE: PERSISTENT"}
+                </Text>
+              </View>
+
+              <View style={styles.statusPill}>
+                <View
+                  style={[
+                    styles.statusDotSmall,
+                    requireBiometrics && hasBiometricHardware ? styles.dotGreen : styles.dotSlate,
+                  ]}
+                />
+                <Text style={styles.statusPillText}>
+                  {requireBiometrics && hasBiometricHardware ? "BIOMETRICS: ON" : "BIOMETRICS: OFF"}
+                </Text>
+              </View>
+
+              <View style={styles.statusPill}>
+                <View style={[styles.statusDotSmall, styles.dotCyan]} />
+                <Text style={styles.statusPillText}>PUSH ACTIVE</Text>
+              </View>
             </View>
           </View>
         </View>
       </View>
+
+      {/* Biometric Verification Unlock Banner (When Biometrics Enforced and Locked) */}
+      {requireBiometrics && hasBiometricHardware && (
+        <View style={isVaultUnlocked ? styles.vaultUnlockedCard : styles.vaultLockedCard}>
+          <View style={styles.vaultCardHeader}>
+            <View style={styles.vaultCardInfo}>
+              <Text style={isVaultUnlocked ? styles.vaultUnlockedTitle : styles.vaultLockedTitle}>
+                {isVaultUnlocked ? "HARDWARE VAULT UNLOCKED" : "HARDWARE VAULT LOCKED"}
+              </Text>
+              <Text style={styles.vaultCardSubtitle}>
+                {isVaultUnlocked
+                  ? "Inherence factor validated. TOTP passcodes visible."
+                  : "Biometric authentication required to reveal 6-digit codes."}
+              </Text>
+            </View>
+            {isVaultUnlocked ? (
+              <TouchableOpacity style={styles.vaultLockButton} onPress={handleLockVault}>
+                <Text style={styles.vaultLockButtonText}>LOCK VAULT</Text>
+              </TouchableOpacity>
+            ) : (
+              <TouchableOpacity style={styles.vaultUnlockButton} onPress={handleUnlockVault}>
+                <Text style={styles.vaultUnlockButtonText}>UNLOCK VAULT</Text>
+              </TouchableOpacity>
+            )}
+          </View>
+          <TouchableOpacity style={styles.biometricToggleRow} onPress={handleToggleBiometrics}>
+            <Text style={styles.biometricToggleText}>
+              Security Policy: {requireBiometrics ? "Enforce Biometrics to View Codes" : "Allow Direct Access"}
+            </Text>
+            <Text style={styles.biometricToggleAction}>[CHANGE]</Text>
+          </TouchableOpacity>
+        </View>
+      )}
 
       {/* Synchronized 30-Second Refresh Progress Bar */}
       <View style={styles.timerCard}>
@@ -546,49 +727,105 @@ export default function AuthenticatorScreen() {
         </View>
       </View>
 
-      {/* Account Enrollment Section */}
+      {/* Account Enrollment Section with Segmented Mode Selector */}
       <View style={styles.enrollmentCard}>
         <View style={styles.enrollmentHeader}>
           <Text style={styles.enrollmentTitle}>PAIR NEW 2FA ACCOUNT</Text>
+          <View style={styles.segmentContainer}>
+            <TouchableOpacity
+              style={[styles.segmentTab, enrollmentTab === "SCAN" && styles.segmentTabActive]}
+              onPress={() => setEnrollmentTab("SCAN")}
+            >
+              <Text
+                style={[
+                  styles.segmentTabText,
+                  enrollmentTab === "SCAN" && styles.segmentTabTextActive,
+                ]}
+              >
+                QR CAMERA
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.segmentTab, enrollmentTab === "MANUAL" && styles.segmentTabActive]}
+              onPress={() => setEnrollmentTab("MANUAL")}
+            >
+              <Text
+                style={[
+                  styles.segmentTabText,
+                  enrollmentTab === "MANUAL" && styles.segmentTabTextActive,
+                ]}
+              >
+                MANUAL ENTRY
+              </Text>
+            </TouchableOpacity>
+          </View>
         </View>
 
-        <TouchableOpacity style={styles.primaryScanButton} onPress={handleOpenScanner}>
-          <Text style={styles.primaryScanButtonText}>SCAN QR CODE</Text>
-        </TouchableOpacity>
+        {enrollmentTab === "SCAN" ? (
+          <View>
+            <Text style={styles.modeDescriptionText}>
+              Scan an enrollment QR code from the Sentinel Web Portal to automatically pair via otpauth protocol.
+            </Text>
+            <TouchableOpacity style={styles.primaryScanButton} onPress={handleOpenScanner}>
+              <Text style={styles.primaryScanButtonText}>LAUNCH QR SCANNER</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View>
+            <Text style={styles.modeDescriptionText}>
+              Enter account details and RFC 6238 Base32 secret key manually for camera-less provisioning.
+            </Text>
 
-        <View style={styles.dividerRow}>
-          <View style={styles.dividerLine} />
-          <Text style={styles.dividerText}>OR MANUAL KEY ENTRY</Text>
-          <View style={styles.dividerLine} />
-        </View>
+            <TextInput
+              style={styles.inputField}
+              placeholder="Account Identity / Email (e.g. user@domain.com)"
+              placeholderTextColor="#64748b"
+              value={accountName}
+              onChangeText={setAccountName}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TextInput
+              style={styles.inputField}
+              placeholder="Issuer / Organization (e.g. Sentinel Security, Google)"
+              placeholderTextColor="#64748b"
+              value={accountIssuer}
+              onChangeText={setAccountIssuer}
+              autoCapitalize="words"
+              autoCorrect={false}
+            />
+            <TextInput
+              style={[
+                styles.inputField,
+                manualValidationError ? styles.inputFieldError : null,
+              ]}
+              placeholder="Base32 Secret Key (e.g. JBSWY3DPEHPK3PXP)"
+              placeholderTextColor="#64748b"
+              value={secretKey}
+              onChangeText={handleSecretKeyChange}
+              autoCapitalize="characters"
+              autoCorrect={false}
+            />
 
-        <TextInput
-          style={styles.inputField}
-          placeholder="Account Name (e.g. user@domain.com)"
-          placeholderTextColor="#64748b"
-          value={accountName}
-          onChangeText={setAccountName}
-          autoCapitalize="none"
-          autoCorrect={false}
-        />
-        <TextInput
-          style={styles.inputField}
-          placeholder="Base32 Secret Key"
-          placeholderTextColor="#64748b"
-          value={secretKey}
-          onChangeText={setSecretKey}
-          autoCapitalize="characters"
-          autoCorrect={false}
-        />
+            {manualValidationError && (
+              <View style={styles.validationErrorBox}>
+                <Text style={styles.validationErrorText}>{manualValidationError}</Text>
+              </View>
+            )}
 
-        <TouchableOpacity style={styles.addKeyButton} onPress={() => handleAddAccount()}>
-          <Text style={styles.addKeyButtonText}>ADD ACCOUNT KEY</Text>
-        </TouchableOpacity>
+            <TouchableOpacity
+              style={styles.addKeyButton}
+              onPress={() => handleAddAccount()}
+            >
+              <Text style={styles.addKeyButtonText}>ENROLL ACCOUNT KEY</Text>
+            </TouchableOpacity>
+          </View>
+        )}
       </View>
 
       {/* Active Accounts Section */}
       <View style={styles.accountsHeaderRow}>
-        <Text style={styles.sectionHeaderTitle}>ENROLLED ACCOUNTS</Text>
+        <Text style={styles.sectionHeaderTitle}>ENROLLED HARDWARE VAULT ACCOUNTS</Text>
         <View style={styles.counterBadge}>
           <Text style={styles.counterBadgeText}>{accounts.length}</Text>
         </View>
@@ -608,29 +845,49 @@ export default function AuthenticatorScreen() {
           const formattedCode =
             code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
 
+          const isLocked = requireBiometrics && hasBiometricHardware && !isVaultUnlocked;
+
           return (
             <View style={styles.accountCard}>
               <View style={styles.accountTopRow}>
-                <Text style={styles.accountName} numberOfLines={1}>
-                  {item.name}
-                </Text>
+                <View style={styles.accountIdentityGroup}>
+                  <Text style={styles.accountName} numberOfLines={1}>
+                    {item.name}
+                  </Text>
+                  {item.issuer && (
+                    <View style={styles.issuerBadge}>
+                      <Text style={styles.issuerBadgeText}>{item.issuer.toUpperCase()}</Text>
+                    </View>
+                  )}
+                </View>
                 <View style={styles.protocolBadge}>
                   <Text style={styles.protocolBadgeText}>SHA-1 / 30S</Text>
                 </View>
               </View>
 
               <View style={styles.tokenRow}>
-                <Text style={styles.totpToken}>{formattedCode}</Text>
+                {isLocked ? (
+                  <TouchableOpacity
+                    style={styles.tokenLockedPlaceholder}
+                    onPress={handleUnlockVault}
+                  >
+                    <Text style={styles.tokenLockedText}>AUTHENTICATION REQUIRED</Text>
+                    <Text style={styles.tokenLockedSubtext}>Tap to unlock with fingerprint / PIN</Text>
+                  </TouchableOpacity>
+                ) : (
+                  <Text style={styles.totpToken}>{formattedCode}</Text>
+                )}
+
                 <TouchableOpacity
                   style={styles.removeButton}
-                  onPress={() => confirmDeleteAccount(item.id, item.name)}
+                  onPress={() => confirmDeleteAccount(item.id, item.name, item.issuer)}
                 >
                   <Text style={styles.removeButtonText}>REMOVE</Text>
                 </TouchableOpacity>
               </View>
 
               <Text style={styles.secretHintText} numberOfLines={1}>
-                KEY: {item.secret.slice(0, 6)}...{item.secret.slice(-4)}
+                VAULT KEY: {item.secret.slice(0, 4)}••••••••{item.secret.slice(-4)}
               </Text>
             </View>
           );
@@ -641,7 +898,7 @@ export default function AuthenticatorScreen() {
             <Text style={styles.emptyTitle}>NO SECURITY KEYS ENROLLED</Text>
             <Text style={styles.emptyDescription}>
               Scan an enrollment QR code from the Sentinel Web Portal or enter a Base32
-              provisioning key to begin generating one-time passcodes.
+              provisioning key manually to begin generating one-time passcodes.
             </Text>
           </View>
         }
@@ -694,7 +951,7 @@ export default function AuthenticatorScreen() {
         </SafeAreaView>
       </Modal>
 
-      {/* In-App Push Authorization Modal (Number Matching) */}
+      {/* In-App Push Authorization Modal (Number Matching with Biometric Proof) */}
       <Modal
         visible={pendingChallenge !== null}
         animationType="fade"
@@ -736,7 +993,7 @@ export default function AuthenticatorScreen() {
             </View>
 
             <Text style={styles.pushPromptText}>
-              Select the number displayed on your browser screen to approve access:
+              Select the number displayed on your browser screen to approve access (biometrics required):
             </Text>
 
             <View style={styles.numberOptionsRow}>
@@ -776,14 +1033,14 @@ const styles = StyleSheet.create({
     backgroundColor: "#050811",
   },
   headerContainer: {
-    marginBottom: 16,
-    paddingBottom: 14,
+    marginBottom: 12,
+    paddingBottom: 12,
     borderBottomWidth: 1,
     borderBottomColor: "rgba(84, 244, 252, 0.15)",
   },
   headerLeft: {
     flexDirection: "row",
-    alignItems: "center",
+    alignItems: "flex-start",
     gap: 12,
   },
   logoImage: {
@@ -792,6 +1049,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     borderWidth: 1,
     borderColor: "rgba(84, 244, 252, 0.35)",
+    marginTop: 2,
   },
   headerTextGroup: {
     flex: 1,
@@ -826,126 +1084,283 @@ const styles = StyleSheet.create({
     fontWeight: "500",
     marginTop: 1,
   },
+  systemStatusRow: {
+    flexDirection: "row",
+    flexWrap: "wrap",
+    gap: 6,
+    marginTop: 8,
+  },
+  statusPill: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.2)",
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    borderRadius: 4,
+    gap: 4,
+  },
+  statusDotSmall: {
+    width: 5,
+    height: 5,
+    borderRadius: 2.5,
+  },
+  dotCyan: {
+    backgroundColor: "#54f4fc",
+  },
+  dotGreen: {
+    backgroundColor: "#10b981",
+  },
+  dotSlate: {
+    backgroundColor: "#64748b",
+  },
+  statusPillText: {
+    fontSize: 8.5,
+    fontWeight: "700",
+    color: "#cbd5e1",
+    letterSpacing: 0.6,
+    fontFamily: "monospace",
+  },
+  vaultLockedCard: {
+    backgroundColor: "rgba(15, 23, 42, 0.85)",
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.4)",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 12,
+  },
+  vaultUnlockedCard: {
+    backgroundColor: "rgba(15, 23, 42, 0.85)",
+    borderWidth: 1,
+    borderColor: "rgba(16, 185, 129, 0.35)",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 12,
+  },
+  vaultCardHeader: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+  },
+  vaultCardInfo: {
+    flex: 1,
+    marginRight: 8,
+  },
+  vaultLockedTitle: {
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1,
+    color: "#f59e0b",
+  },
+  vaultUnlockedTitle: {
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 1,
+    color: "#10b981",
+  },
+  vaultCardSubtitle: {
+    fontSize: 9.5,
+    color: "#94a3b8",
+    marginTop: 2,
+  },
+  vaultUnlockButton: {
+    backgroundColor: "#54f4fc",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 4,
+  },
+  vaultUnlockButtonText: {
+    color: "#000000",
+    fontSize: 9.5,
+    fontWeight: "800",
+    letterSpacing: 0.6,
+  },
+  vaultLockButton: {
+    borderWidth: 1,
+    borderColor: "rgba(148, 163, 184, 0.4)",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 4,
+  },
+  vaultLockButtonText: {
+    color: "#94a3b8",
+    fontSize: 9.5,
+    fontWeight: "700",
+    letterSpacing: 0.6,
+  },
+  biometricToggleRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 6,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.06)",
+  },
+  biometricToggleText: {
+    fontSize: 9,
+    color: "#64748b",
+  },
+  biometricToggleAction: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#54f4fc",
+    letterSpacing: 0.5,
+  },
   timerCard: {
     backgroundColor: "#070c16",
     borderWidth: 1,
     borderColor: "rgba(84, 244, 252, 0.18)",
     borderRadius: 8,
-    padding: 12,
-    marginBottom: 16,
+    padding: 10,
+    marginBottom: 12,
   },
   timerHeaderRow: {
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
-    marginBottom: 8,
+    marginBottom: 6,
   },
   timerLabel: {
-    fontSize: 10,
+    fontSize: 9.5,
     fontWeight: "700",
     letterSpacing: 1,
     color: "#94a3b8",
   },
   timerCountdown: {
-    fontSize: 12,
+    fontSize: 11,
     fontWeight: "700",
     color: "#54f4fc",
     fontFamily: "monospace",
   },
   progressTrack: {
-    height: 5,
+    height: 4,
     backgroundColor: "#0f172a",
-    borderRadius: 3,
+    borderRadius: 2,
     overflow: "hidden",
   },
   progressBar: {
     height: "100%",
     backgroundColor: "#54f4fc",
-    borderRadius: 3,
+    borderRadius: 2,
   },
   enrollmentCard: {
     backgroundColor: "#070c16",
     borderWidth: 1,
     borderColor: "rgba(84, 244, 252, 0.18)",
     borderRadius: 8,
-    padding: 14,
-    marginBottom: 16,
+    padding: 12,
+    marginBottom: 14,
   },
   enrollmentHeader: {
-    marginBottom: 12,
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginBottom: 10,
   },
   enrollmentTitle: {
-    fontSize: 11,
+    fontSize: 10.5,
     fontWeight: "700",
     letterSpacing: 1.2,
     color: "#54f4fc",
   },
+  segmentContainer: {
+    flexDirection: "row",
+    backgroundColor: "#0f172a",
+    borderRadius: 6,
+    padding: 2,
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.15)",
+  },
+  segmentTab: {
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+  },
+  segmentTabActive: {
+    backgroundColor: "rgba(84, 244, 252, 0.2)",
+  },
+  segmentTabText: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#64748b",
+    letterSpacing: 0.5,
+  },
+  segmentTabTextActive: {
+    color: "#54f4fc",
+  },
+  modeDescriptionText: {
+    fontSize: 10.5,
+    color: "#94a3b8",
+    lineHeight: 15,
+    marginBottom: 10,
+  },
   primaryScanButton: {
     backgroundColor: "#54f4fc",
-    paddingVertical: 12,
-    borderRadius: 8,
+    paddingVertical: 10,
+    borderRadius: 6,
     alignItems: "center",
     justifyContent: "center",
   },
   primaryScanButtonText: {
     color: "#000000",
     fontWeight: "800",
-    fontSize: 13,
+    fontSize: 12,
     letterSpacing: 1,
-  },
-  dividerRow: {
-    flexDirection: "row",
-    alignItems: "center",
-    marginVertical: 12,
-  },
-  dividerLine: {
-    flex: 1,
-    height: 1,
-    backgroundColor: "rgba(255, 255, 255, 0.1)",
-  },
-  dividerText: {
-    fontSize: 10,
-    fontWeight: "700",
-    letterSpacing: 1,
-    color: "#64748b",
-    marginHorizontal: 8,
   },
   inputField: {
     backgroundColor: "#0b1120",
     borderWidth: 1,
     borderColor: "rgba(84, 244, 252, 0.2)",
-    borderRadius: 8,
-    paddingHorizontal: 12,
-    paddingVertical: 10,
-    fontSize: 13,
+    borderRadius: 6,
+    paddingHorizontal: 10,
+    paddingVertical: 8,
+    fontSize: 12,
     color: "#ffffff",
-    marginBottom: 10,
+    marginBottom: 8,
+  },
+  inputFieldError: {
+    borderColor: "#ef4444",
+  },
+  validationErrorBox: {
+    backgroundColor: "rgba(239, 68, 68, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.3)",
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 4,
+    marginBottom: 8,
+  },
+  validationErrorText: {
+    fontSize: 10,
+    color: "#f87171",
   },
   addKeyButton: {
     backgroundColor: "transparent",
     borderWidth: 1,
     borderColor: "#54f4fc",
-    paddingVertical: 11,
-    borderRadius: 8,
+    paddingVertical: 10,
+    borderRadius: 6,
     alignItems: "center",
     justifyContent: "center",
   },
   addKeyButtonText: {
     color: "#54f4fc",
     fontWeight: "800",
-    fontSize: 12,
+    fontSize: 11,
     letterSpacing: 1,
   },
   accountsHeaderRow: {
     flexDirection: "row",
     alignItems: "center",
     justifyContent: "space-between",
-    marginBottom: 10,
+    marginBottom: 8,
   },
   sectionHeaderTitle: {
-    fontSize: 11,
+    fontSize: 10,
     fontWeight: "700",
-    letterSpacing: 1.2,
+    letterSpacing: 1.1,
     color: "#94a3b8",
   },
   counterBadge: {
@@ -957,7 +1372,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(84, 244, 252, 0.3)",
   },
   counterBadgeText: {
-    fontSize: 11,
+    fontSize: 10.5,
     fontWeight: "700",
     color: "#54f4fc",
     fontFamily: "monospace",
@@ -972,7 +1387,7 @@ const styles = StyleSheet.create({
     borderLeftWidth: 3,
     borderLeftColor: "#54f4fc",
     borderRadius: 8,
-    padding: 14,
+    padding: 12,
     marginBottom: 10,
   },
   accountTopRow: {
@@ -981,12 +1396,31 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginBottom: 6,
   },
+  accountIdentityGroup: {
+    flex: 1,
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginRight: 8,
+  },
   accountName: {
-    fontSize: 14,
+    fontSize: 13,
     fontWeight: "700",
     color: "#ffffff",
-    flex: 1,
-    marginRight: 8,
+  },
+  issuerBadge: {
+    backgroundColor: "rgba(84, 244, 252, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.25)",
+    paddingHorizontal: 5,
+    paddingVertical: 1,
+    borderRadius: 3,
+  },
+  issuerBadgeText: {
+    fontSize: 8,
+    fontWeight: "700",
+    color: "#54f4fc",
+    letterSpacing: 0.6,
   },
   protocolBadge: {
     backgroundColor: "#0f172a",
@@ -997,7 +1431,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(255, 255, 255, 0.1)",
   },
   protocolBadgeText: {
-    fontSize: 9,
+    fontSize: 8.5,
     fontWeight: "700",
     letterSpacing: 0.8,
     color: "#94a3b8",
@@ -1009,29 +1443,51 @@ const styles = StyleSheet.create({
     alignItems: "center",
     marginVertical: 4,
   },
+  tokenLockedPlaceholder: {
+    flex: 1,
+    backgroundColor: "rgba(15, 23, 42, 0.7)",
+    borderWidth: 1,
+    borderStyle: "dashed",
+    borderColor: "rgba(245, 158, 11, 0.4)",
+    borderRadius: 6,
+    paddingVertical: 8,
+    paddingHorizontal: 10,
+    marginRight: 8,
+  },
+  tokenLockedText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#f59e0b",
+    letterSpacing: 1,
+  },
+  tokenLockedSubtext: {
+    fontSize: 9,
+    color: "#94a3b8",
+    marginTop: 2,
+  },
   totpToken: {
-    fontSize: 28,
+    fontSize: 26,
     fontWeight: "800",
-    letterSpacing: 4,
+    letterSpacing: 3,
     color: "#54f4fc",
     fontFamily: "monospace",
   },
   removeButton: {
     paddingVertical: 6,
-    paddingHorizontal: 10,
+    paddingHorizontal: 8,
     borderWidth: 1,
     borderColor: "rgba(239, 68, 68, 0.4)",
     backgroundColor: "rgba(239, 68, 68, 0.05)",
     borderRadius: 6,
   },
   removeButtonText: {
-    fontSize: 10,
+    fontSize: 9.5,
     fontWeight: "700",
     letterSpacing: 0.8,
     color: "#ef4444",
   },
   secretHintText: {
-    fontSize: 10,
+    fontSize: 9.5,
     color: "#64748b",
     fontFamily: "monospace",
     letterSpacing: 0.5,
@@ -1054,17 +1510,17 @@ const styles = StyleSheet.create({
     marginBottom: 12,
   },
   emptyTitle: {
-    fontSize: 12,
+    fontSize: 11.5,
     fontWeight: "700",
     letterSpacing: 1.2,
     color: "#e2e8f0",
     marginBottom: 6,
   },
   emptyDescription: {
-    fontSize: 12,
+    fontSize: 11.5,
     color: "#64748b",
     textAlign: "center",
-    lineHeight: 18,
+    lineHeight: 17,
   },
   scannerContainer: {
     flex: 1,
@@ -1171,31 +1627,6 @@ const styles = StyleSheet.create({
   cameraFallbackText: {
     color: "#94a3b8",
     fontSize: 13,
-  },
-  pushStatusBadge: {
-    flexDirection: "row",
-    alignItems: "center",
-    gap: 5,
-    marginTop: 6,
-    alignSelf: "flex-start",
-    backgroundColor: "rgba(84, 244, 252, 0.08)",
-    paddingHorizontal: 8,
-    paddingVertical: 2,
-    borderRadius: 4,
-    borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.25)",
-  },
-  pushActivePulse: {
-    width: 6,
-    height: 6,
-    borderRadius: 3,
-    backgroundColor: "#54f4fc",
-  },
-  pushStatusText: {
-    fontSize: 9,
-    fontWeight: "700",
-    color: "#54f4fc",
-    letterSpacing: 1,
   },
   pushModalOverlay: {
     flex: 1,
