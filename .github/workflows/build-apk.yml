@@ -29,7 +29,10 @@ jobs:
         run: npm ci --prefer-offline --no-audit
 
       - name: TypeScript Type Check
-        run: npx tsc --noEmit
+        run: |
+          # expo-env.d.ts is gitignored (generated locally by Expo); recreate it for CI
+          [ -f expo-env.d.ts ] || echo '/// <reference types="expo/types" />' > expo-env.d.ts
+          npx tsc --noEmit
 
       - name: Expo Dependency Compatibility Check (warning only)
         continue-on-error: true
