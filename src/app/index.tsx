@@ -42,8 +42,9 @@ try {
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  const safePromise = promise.catch(() => null as unknown as T);
   return Promise.race([
-    promise,
+    safePromise,
     new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
   ]);
 }
