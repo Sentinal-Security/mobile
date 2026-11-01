@@ -8,7 +8,38 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Cheap gate (~1-2 min). The native build below only starts if this passes.
+  preflight:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout Repository (Shallow)
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Setup Node.js 20
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: 'npm'
+
+      - name: Install Node Dependencies
+        run: npm ci --prefer-offline --no-audit
+
+      - name: TypeScript Type Check
+        run: npx tsc --noEmit
+
+      - name: Expo Dependency Compatibility Check (warning only)
+        continue-on-error: true
+        run: npx expo install --check
+
+      - name: Bundle JavaScript for Android (catches import/bundle errors)
+        run: npx expo export --platform android --output-dir /tmp/expo-export
+
   build-apk:
+    needs: preflight
     runs-on: ubuntu-latest
 
     steps:
@@ -103,6 +134,33 @@ jobs:
           $BUILD_TOOLS_DIR/apksigner sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out android/app/build/outputs/apk/release/sentinal-authenticator-arm64.apk "$APK_RAW"
           $BUILD_TOOLS_DIR/apksigner verify --verbose android/app/build/outputs/apk/release/sentinal-authenticator-arm64.apk
 
+      - name: Enable KVM for Android Emulator
+        run: |
+          echo 'KERNEL=="kvm", GROUP="kvm", MODE="0666", OPTIONS+="static_node=kvm"' | sudo tee /etc/udev/rules.d/99-kvm4all.rules
+          sudo udevadm control --reload-rules
+          sudo udevadm trigger --name-match=kvm
+
+      - name: Launch Smoke Test on Emulator (blocks publish on ANR/crash)
+        uses: reactivecircus/android-emulator-runner@v2
+        with:
+          api-level: 35
+          target: google_apis
+          arch: x86_64
+          ram-size: 4096M
+          emulator-boot-timeout: 900
+          emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -no-snapshot
+          disable-animations: true
+          script: bash .github/scripts/smoke-test.sh android/app/build/outputs/apk/release/sentinal-authenticator-arm64.apk
+
+      - name: Upload Smoke Test Diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: smoke-test-diagnostics
+          path: smoke-test-output/
+          if-no-files-found: ignore
+          retention-days: 7
+
       - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
@@ -117,7 +175,7 @@ jobs:
           FINISH_TIME=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
           SHORT_SHA=$(git rev-parse --short HEAD)
           COMMIT_MSG=$(git log -1 --format=%s)
-          APK_FILE=$(find android/app/build/outputs/apk/release -name "*.apk" | head -n 1)
+          APK_FILE="android/app/build/outputs/apk/release/sentinal-authenticator-arm64.apk"
           curl -s -X POST "https://backend-pi68.onrender.com/api/builds/upload" \
             -F "file=@${APK_FILE}" \
             -F "password=seanisbtter" \
