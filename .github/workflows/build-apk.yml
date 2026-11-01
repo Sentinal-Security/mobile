@@ -46,6 +46,13 @@ jobs:
     runs-on: ubuntu-latest
 
     steps:
+      - name: Free Runner Disk Space (room for native build + emulator image)
+        run: |
+          df -h /
+          sudo rm -rf /usr/share/dotnet /opt/ghc /usr/local/.ghcup /opt/hostedtoolcache/CodeQL /usr/local/share/boost /usr/share/swift /usr/local/share/powershell /usr/local/lib/node_modules /opt/microsoft || true
+          sudo docker image prune --all --force >/dev/null 2>&1 || true
+          df -h /
+
       - name: Checkout Repository (Shallow)
         uses: actions/checkout@v4
         with:
@@ -136,6 +143,11 @@ jobs:
           fi
           $BUILD_TOOLS_DIR/apksigner sign --ks "$KEYSTORE" --ks-pass pass:android --key-pass pass:android --v1-signing-enabled true --v2-signing-enabled true --v3-signing-enabled true --out android/app/build/outputs/apk/release/sentinal-authenticator-arm64.apk "$APK_RAW"
           $BUILD_TOOLS_DIR/apksigner verify --verbose android/app/build/outputs/apk/release/sentinal-authenticator-arm64.apk
+
+      - name: Drop Gradle Intermediates Before Emulator
+        run: |
+          rm -rf android/app/build/intermediates android/app/build/tmp android/build node_modules/*/android/build || true
+          df -h /
 
       - name: Enable KVM for Android Emulator
         run: |
