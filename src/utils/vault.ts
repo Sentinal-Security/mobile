@@ -19,6 +19,13 @@ const LEGACY_STORAGE_KEY = "@sentinel_totp_accounts";
 const SETTINGS_SECURE_KEY = "sentinel_vault_settings";
 const SETTINGS_LEGACY_KEY = "@sentinel_vault_settings";
 
+function getSecureStoreWriteOptions(): SecureStore.SecureStoreOptions {
+  if (Platform.OS === "ios") {
+    return { keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY };
+  }
+  return {};
+}
+
 /**
  * Checks whether hardware-backed SecureStore (Android KeyStore / iOS Keychain)
  * is available on the current device runtime.
@@ -56,9 +63,11 @@ export async function loadAccountsFromVault(): Promise<TotpAccount[]> {
         const parsedLegacy = JSON.parse(legacyData);
         if (Array.isArray(parsedLegacy) && parsedLegacy.length > 0) {
           // Encrypt and store into Android KeyStore
-          await SecureStore.setItemAsync(SECURE_STORE_KEY, JSON.stringify(parsedLegacy), {
-            keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-          });
+          await SecureStore.setItemAsync(
+            SECURE_STORE_KEY,
+            JSON.stringify(parsedLegacy),
+            getSecureStoreWriteOptions()
+          );
           // Delete legacy unencrypted copy to prevent storage leakage
           await AsyncStorage.removeItem(LEGACY_STORAGE_KEY);
           return parsedLegacy;
@@ -89,9 +98,7 @@ export async function saveAccountsToVault(accounts: TotpAccount[]): Promise<bool
     const serialized = JSON.stringify(accounts);
 
     if (isSecureAvailable) {
-      await SecureStore.setItemAsync(SECURE_STORE_KEY, serialized, {
-        keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-      });
+      await SecureStore.setItemAsync(SECURE_STORE_KEY, serialized, getSecureStoreWriteOptions());
       return true;
     } else {
       await AsyncStorage.setItem(LEGACY_STORAGE_KEY, serialized);
@@ -140,9 +147,7 @@ export async function saveVaultSettings(settings: VaultSettings): Promise<boolea
     const serialized = JSON.stringify(settings);
     const isSecureAvailable = await isHardwareVaultAvailable();
     if (isSecureAvailable) {
-      await SecureStore.setItemAsync(SETTINGS_SECURE_KEY, serialized, {
-        keychainAccessible: SecureStore.WHEN_UNLOCKED_THIS_DEVICE_ONLY,
-      });
+      await SecureStore.setItemAsync(SETTINGS_SECURE_KEY, serialized, getSecureStoreWriteOptions());
       return true;
     } else {
       await AsyncStorage.setItem(SETTINGS_LEGACY_KEY, serialized);

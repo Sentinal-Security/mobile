@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState, useEffect, useRef } from "react";
 import {
   View,
   Text,
@@ -10,7 +10,12 @@ import {
   Image,
   Modal,
   Platform,
+  AppState,
+  InteractionManager,
+  PermissionsAndroid,
+  type Permission,
 } from "react-native";
+import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Notifications from "expo-notifications";
@@ -27,18 +32,10 @@ import {
   saveVaultSettings,
 } from "@/utils/vault";
 
-try {
-  Notifications.setNotificationHandler({
-    handleNotification: async () => ({
-      shouldShowAlert: true,
-      shouldPlaySound: true,
-      shouldSetBadge: true,
-      shouldShowBanner: true,
-      shouldShowList: true,
-    }),
-  });
-} catch (handlerErr) {
-  console.warn("Notifications handler initialization notice:", handlerErr);
+const STARTUP_PERMS_PROMPTED_KEY = "@sentinel_startup_perms_v1";
+
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
@@ -47,6 +44,61 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null
     safePromise,
     new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
   ]);
+}
+
+function waitForAfterInteractions(maxWaitMs = 900): Promise<void> {
+  return new Promise((resolve) => {
+    let settled = false;
+    const finish = () => {
+      if (!settled) {
+        settled = true;
+        resolve();
+      }
+    };
+    const fallbackTimer = setTimeout(finish, maxWaitMs);
+    try {
+      InteractionManager.runAfterInteractions(() => {
+        clearTimeout(fallbackTimer);
+        finish();
+      });
+    } catch {
+      clearTimeout(fallbackTimer);
+      finish();
+    }
+  });
+}
+
+function waitForActiveAppState(
+  isCancelledRef: { current: boolean },
+  maxWaitMs = 8000
+): Promise<boolean> {
+  if (isCancelledRef.current) return Promise.resolve(false);
+  if (AppState.currentState === "active") return Promise.resolve(true);
+
+  return new Promise((resolve) => {
+    let resolved = false;
+    let subscription: ReturnType<typeof AppState.addEventListener> | null = null;
+
+    const cleanupAndResolve = (active: boolean) => {
+      if (resolved) return;
+      resolved = true;
+      clearTimeout(timeoutId);
+      subscription?.remove();
+      resolve(active && !isCancelledRef.current);
+    };
+
+    const timeoutId = setTimeout(() => {
+      cleanupAndResolve(AppState.currentState === "active");
+    }, maxWaitMs);
+
+    subscription = AppState.addEventListener("change", (nextState) => {
+      if (isCancelledRef.current) {
+        cleanupAndResolve(false);
+      } else if (nextState === "active") {
+        cleanupAndResolve(true);
+      }
+    });
+  });
 }
 
 const API_BASE_URL = "https://backend-pi68.onrender.com";
@@ -63,6 +115,7 @@ interface PendingChallenge {
 export default function AuthenticatorScreen() {
   const [accounts, setAccounts] = useState<TotpAccount[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
+  const [isStartupComplete, setIsStartupComplete] = useState(false);
   const [isHardwareVault, setIsHardwareVault] = useState<boolean | null>(null);
 
   // Biometric Inherence Factor State
@@ -82,99 +135,230 @@ export default function AuthenticatorScreen() {
   // TOTP Clock and Scanner
   const [remainingSeconds, setRemainingSeconds] = useState(getSecondsRemaining());
   const [showScanner, setShowScanner] = useState(false);
-  const [permission, requestPermission] = useCameraPermissions();
+  const [permission, requestPermission, getCameraPermission] = useCameraPermissions();
 
   // Out-of-band Push Challenge
   const [pendingChallenge, setPendingChallenge] = useState<PendingChallenge | null>(null);
   const [respondingChallenge, setRespondingChallenge] = useState(false);
   const [pushToken, setPushToken] = useState<string | null>(null);
 
-  // Initialize Android Notification Channel and retrieve device push token
+  // Native dialog and scanner concurrency guards
+  const authInFlightRef = useRef(false);
+  const scanLockRef = useRef(false);
+  const getCameraPermissionRef = useRef(getCameraPermission);
+  getCameraPermissionRef.current = getCameraPermission;
+
+  // Unified, strictly sequential startup lifecycle to prevent native Activity / BiometricPrompt ANR collisions
   useEffect(() => {
-    let isCancelled = false;
-    const configurePushTimer = setTimeout(async () => {
+    const isCancelledRef = { current: false };
+
+    const runSequentialStartup = async () => {
+      let hasHw = false;
+      let isEnr = false;
+      let enforceBio = true;
+
       try {
-        if (Platform.OS === "android") {
-          try {
-            await Notifications.setNotificationChannelAsync("mfa-alerts", {
+        // Phase 1: Non-blocking read-only vault and biometric hardware capability hydration
+        const isHwAvailable = (await withTimeout(isHardwareVaultAvailable(), 2000)) ?? false;
+        if (isCancelledRef.current) return;
+        setIsHardwareVault(isHwAvailable);
+
+        hasHw = (await withTimeout(LocalAuthentication.hasHardwareAsync(), 2000)) ?? false;
+        isEnr = (await withTimeout(LocalAuthentication.isEnrolledAsync(), 2000)) ?? false;
+        if (isCancelledRef.current) return;
+        setHasBiometricHardware(hasHw);
+        setBiometricEnrolled(isEnr);
+
+        const authTypes: LocalAuthentication.AuthenticationType[] =
+          (await withTimeout(LocalAuthentication.supportedAuthenticationTypesAsync(), 2000)) ?? [];
+        if (!isCancelledRef.current) {
+          if (authTypes.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) {
+            setBiometricTypeLabel("FINGERPRINT");
+          } else if (authTypes.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
+            setBiometricTypeLabel("FACE ID");
+          } else if (authTypes.includes(LocalAuthentication.AuthenticationType.IRIS)) {
+            setBiometricTypeLabel("IRIS");
+          } else if (hasHw) {
+            setBiometricTypeLabel("BIOMETRIC");
+          } else {
+            setBiometricTypeLabel("DEVICE PIN");
+          }
+        }
+
+        const settings = (await withTimeout(loadVaultSettings(), 2500)) ?? {
+          requireBiometrics: true,
+        };
+        enforceBio = settings.requireBiometrics;
+        if (!isCancelledRef.current) {
+          setRequireBiometrics(enforceBio);
+          if (!enforceBio || !hasHw || !isEnr) {
+            setIsVaultUnlocked(true);
+          } else {
+            setIsVaultUnlocked(false);
+          }
+        }
+
+        const storedAccounts = (await withTimeout(loadAccountsFromVault(), 2500)) ?? [];
+        if (!isCancelledRef.current) {
+          setAccounts(storedAccounts);
+          setIsLoaded(true);
+        }
+      } catch (err) {
+        console.error("Failed to initialize security vault:", err);
+        if (!isCancelledRef.current) {
+          setIsLoaded(true);
+        }
+      }
+
+      // Phase 2: Dismiss splash screen and wait for Android 15 SplashScreenView exit animation to fully detach
+      try {
+        SplashScreen.hideAsync().catch(() => {});
+      } catch {
+        // Ignore splash lifecycle notice
+      }
+      await waitForAfterInteractions(900);
+      await delay(900);
+      if (isCancelledRef.current) return;
+
+      // Phase 3: Configure notification channel and acquire startup permissions in a single atomic OS dialog
+      try {
+        Notifications.setNotificationHandler({
+          handleNotification: async () => ({
+            shouldShowAlert: true,
+            shouldPlaySound: true,
+            shouldSetBadge: true,
+            shouldShowBanner: true,
+            shouldShowList: true,
+          }),
+        });
+      } catch (handlerErr) {
+        console.warn("Notifications handler initialization notice:", handlerErr);
+      }
+
+      let notificationsGranted = false;
+      if (Platform.OS === "android") {
+        try {
+          await withTimeout(
+            Notifications.setNotificationChannelAsync("mfa-alerts", {
               name: "MFA Security Challenges",
               importance: Notifications.AndroidImportance.MAX,
               vibrationPattern: [0, 250, 250, 250],
               lightColor: "#54f4fc",
               sound: "default",
-            });
-          } catch (chErr) {
-            console.warn("Notification channel setup notice:", chErr);
-          }
+            }),
+            2000
+          );
+        } catch (chErr) {
+          console.warn("Notification channel setup notice:", chErr);
         }
 
-        const permissions = await withTimeout(Notifications.getPermissionsAsync(), 2000);
-        let finalStatus = permissions?.status;
-        if (finalStatus !== "granted") {
-          const reqRes = await withTimeout(Notifications.requestPermissionsAsync(), 3000);
-          finalStatus = reqRes?.status;
-        }
-        if (finalStatus !== "granted" || isCancelled) {
-          return;
-        }
-
-        let token: string | null = null;
         try {
-          const deviceTokenRes = await withTimeout(Notifications.getDevicePushTokenAsync(), 3000);
-          if (deviceTokenRes && deviceTokenRes.data) {
-            token = deviceTokenRes.data;
+          const notifPerm = PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS;
+          const camPerm = PermissionsAndroid.PERMISSIONS.CAMERA;
+
+          const hasNotif =
+            (await withTimeout(PermissionsAndroid.check(notifPerm), 1500)) ?? false;
+          const hasCam =
+            (await withTimeout(PermissionsAndroid.check(camPerm), 1500)) ?? false;
+          notificationsGranted = hasNotif;
+
+          const alreadyPrompted = await withTimeout(
+            AsyncStorage.getItem(STARTUP_PERMS_PROMPTED_KEY),
+            1500
+          );
+
+          const missingPerms: Permission[] = [];
+          if (!hasNotif) missingPerms.push(notifPerm);
+          if (!hasCam) missingPerms.push(camPerm);
+
+          if (missingPerms.length > 0 && !alreadyPrompted && !isCancelledRef.current) {
+            const appReadyForPerms = await waitForActiveAppState(isCancelledRef, 8000);
+            if (appReadyForPerms && !isCancelledRef.current) {
+              const permResults = await PermissionsAndroid.requestMultiple(missingPerms);
+              notificationsGranted =
+                permResults[notifPerm] === PermissionsAndroid.RESULTS.GRANTED || hasNotif;
+
+              await AsyncStorage.setItem(STARTUP_PERMS_PROMPTED_KEY, "1").catch(() => {});
+              await withTimeout(getCameraPermissionRef.current(), 1500);
+
+              // Allow GrantPermissionsActivity window transition to fully close and return focus to MainActivity
+              await waitForActiveAppState(isCancelledRef, 8000);
+              await waitForAfterInteractions(600);
+              await delay(850);
+            }
+          }
+        } catch (permErr) {
+          console.warn("Startup permission acquisition notice:", permErr);
+        }
+      } else {
+        const permStatus = await withTimeout(Notifications.getPermissionsAsync(), 2000);
+        notificationsGranted = permStatus?.status === "granted";
+      }
+
+      if (isCancelledRef.current) return;
+
+      // Phase 4: Prompt hardware biometrics or PIN strictly after all permission dialogs have settled
+      if (enforceBio && hasHw && isEnr && !authInFlightRef.current && !isCancelledRef.current) {
+        const appReadyForBio = await waitForActiveAppState(isCancelledRef, 6000);
+        if (
+          appReadyForBio &&
+          AppState.currentState === "active" &&
+          !authInFlightRef.current &&
+          !isCancelledRef.current
+        ) {
+          authInFlightRef.current = true;
+          try {
+            const authResult = await LocalAuthentication.authenticateAsync({
+              promptMessage: "Authenticate to Unlock Sentinel Authenticator",
+              cancelLabel: "Cancel",
+              fallbackLabel: "Use Device PIN",
+              disableDeviceFallback: false,
+            });
+            if (authResult.success && !isCancelledRef.current) {
+              setIsVaultUnlocked(true);
+            }
+          } catch (authErr) {
+            console.warn("Startup biometric authentication notice:", authErr);
+          } finally {
+            authInFlightRef.current = false;
+          }
+          await delay(300);
+        }
+      }
+
+      if (isCancelledRef.current) return;
+
+      // Phase 5: Acquire FCM push token quietly in background after interactive prompts finish
+      if (notificationsGranted) {
+        try {
+          const deviceTokenRes = await withTimeout(Notifications.getDevicePushTokenAsync(), 3500);
+          if (deviceTokenRes?.data && !isCancelledRef.current) {
+            setPushToken(String(deviceTokenRes.data));
           }
         } catch {
-          // Device push token fallback
+          // Ignore device push token fallback notice
         }
-
-        if (!token && !isCancelled) {
-          try {
-            const expoTokenRes = await withTimeout(Notifications.getExpoPushTokenAsync(), 3000);
-            if (expoTokenRes && expoTokenRes.data) {
-              token = expoTokenRes.data;
-            }
-          } catch {
-            // Expo push token fallback
-          }
-        }
-
-        if (token && !isCancelled) {
-          setPushToken(token);
-        }
-      } catch (err) {
-        console.warn("Push token registration notice:", err);
       }
-    }, 1200);
+
+      if (!isCancelledRef.current) {
+        setIsStartupComplete(true);
+      }
+    };
+
+    runSequentialStartup().finally(() => {
+      if (!isCancelledRef.current) {
+        setIsStartupComplete(true);
+      }
+    });
 
     return () => {
-      isCancelled = true;
-      clearTimeout(configurePushTimer);
+      isCancelledRef.current = true;
     };
   }, []);
 
-  // Proactively request camera permission on initial app mount
-  useEffect(() => {
-    let isCancelled = false;
-    const cameraPermTimer = setTimeout(async () => {
-      try {
-        if (!permission?.granted && !isCancelled) {
-          await requestPermission();
-        }
-      } catch (camErr) {
-        console.warn("Initial camera permission notice:", camErr);
-      }
-    }, 800);
-
-    return () => {
-      isCancelled = true;
-      clearTimeout(cameraPermTimer);
-    };
-  }, [permission?.granted]);
-
   // Sync device push token to backend for enrolled accounts with proof of possession
   useEffect(() => {
-    if (!pushToken) return;
+    if (!pushToken || !isStartupComplete) return;
 
     accounts.forEach((acc) => {
       if (acc.name && acc.name.includes("@") && acc.secret) {
@@ -199,7 +383,7 @@ export default function AuthenticatorScreen() {
         }
       }
     });
-  }, [pushToken, accounts]);
+  }, [pushToken, accounts, isStartupComplete]);
 
   // Handle tap on system push notification banner
   useEffect(() => {
@@ -234,114 +418,43 @@ export default function AuthenticatorScreen() {
     };
   }, []);
 
-  // Initialize hardware vault, biometrics status, and load encrypted accounts on mount
-  useEffect(() => {
-    let isMounted = true;
-    const initializeVault = async () => {
-      try {
-        const isHwAvailable = await isHardwareVaultAvailable();
-        if (isMounted) setIsHardwareVault(isHwAvailable);
-
-        const hasHw = await LocalAuthentication.hasHardwareAsync();
-        const isEnr = await LocalAuthentication.isEnrolledAsync();
-        if (isMounted) {
-          setHasBiometricHardware(hasHw);
-          setBiometricEnrolled(isEnr);
-        }
-
-        const authTypes: LocalAuthentication.AuthenticationType[] =
-          (await LocalAuthentication.supportedAuthenticationTypesAsync().catch(() => [])) || [];
-        if (isMounted) {
-          if (authTypes.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) {
-            setBiometricTypeLabel("FINGERPRINT");
-          } else if (authTypes.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
-            setBiometricTypeLabel("FACE ID");
-          } else if (authTypes.includes(LocalAuthentication.AuthenticationType.IRIS)) {
-            setBiometricTypeLabel("IRIS");
-          } else if (hasHw) {
-            setBiometricTypeLabel("BIOMETRIC");
-          } else {
-            setBiometricTypeLabel("DEVICE PIN");
-          }
-        }
-
-        const settings = await loadVaultSettings();
-        if (isMounted) {
-          setRequireBiometrics(settings.requireBiometrics);
-          // If biometric hardware or enrollment is missing, auto-unlock vault
-          if (!settings.requireBiometrics || !hasHw || !isEnr) {
-            setIsVaultUnlocked(true);
-          } else {
-            setIsVaultUnlocked(false);
-          }
-        }
-
-        const storedAccounts = await loadAccountsFromVault();
-        if (isMounted) {
-          setAccounts(storedAccounts);
-        }
-
-        // Auto-prompt native fingerprint scanner or device PIN on application launch
-        if (settings.requireBiometrics && hasHw && isEnr) {
-          setTimeout(async () => {
-            if (!isMounted) return;
-            try {
-              const authResult = await LocalAuthentication.authenticateAsync({
-                promptMessage: "Authenticate to Unlock Sentinel Authenticator",
-                cancelLabel: "Cancel",
-                fallbackLabel: "Use Device PIN",
-                disableDeviceFallback: false,
-              });
-              if (authResult.success && isMounted) {
-                setIsVaultUnlocked(true);
-              }
-            } catch (authErr) {
-              console.warn("Startup biometric authentication notice:", authErr);
-            }
-          }, 350);
-        }
-      } catch (err) {
-        console.error("Failed to initialize security vault:", err);
-      } finally {
-        if (isMounted) {
-          setIsLoaded(true);
-        }
-        SplashScreen.hideAsync().catch(() => {});
-      }
-    };
-
-    initializeVault();
-
-    return () => {
-      isMounted = false;
-    };
-  }, []);
-
-  // Persist accounts to hardware KeyStore whenever accounts change
-  useEffect(() => {
-    if (!isLoaded) return;
-    saveAccountsToVault(accounts).catch((err) => {
-      console.error("Failed to persist accounts to vault:", err);
-    });
-  }, [accounts, isLoaded]);
-
-  // Synchronized 1-second TOTP clock tick
+  // Foreground-only 1-second TOTP clock tick to avoid background UI thread commits
   useEffect(() => {
     const timer = setInterval(() => {
-      setRemainingSeconds(getSecondsRemaining());
+      if (AppState.currentState === "active") {
+        setRemainingSeconds(getSecondsRemaining());
+      }
     }, 1000);
 
-    return () => clearInterval(timer);
+    const appStateSub = AppState.addEventListener("change", (nextState) => {
+      if (nextState === "active") {
+        setRemainingSeconds(getSecondsRemaining());
+      }
+    });
+
+    return () => {
+      clearInterval(timer);
+      appStateSub.remove();
+    };
   }, []);
 
-  // Poll for active push verification challenges with timeout protection
+  // Poll for active push verification challenges strictly after startup settles
   useEffect(() => {
-    if (!isLoaded) return;
+    if (!isLoaded || !isStartupComplete) return;
 
     let isMounted = true;
     let pollInterval: ReturnType<typeof setInterval> | null = null;
 
     const checkPendingChallenges = async () => {
+      if (
+        !isMounted ||
+        AppState.currentState !== "active" ||
+        authInFlightRef.current ||
+        showScanner
+      ) {
+        return;
+      }
+
       const emailsToCheck = new Set<string>();
       accounts.forEach((acc) => {
         if (acc.name && acc.name.includes("@")) {
@@ -355,7 +468,7 @@ export default function AuthenticatorScreen() {
       if (emailsToCheck.size === 0) return;
 
       for (const email of emailsToCheck) {
-        if (!isMounted) return;
+        if (!isMounted || AppState.currentState !== "active" || authInFlightRef.current) return;
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 4000);
@@ -368,7 +481,7 @@ export default function AuthenticatorScreen() {
           const json = await res.json();
           if (json.success && json.data?.hasPending && json.data.challenge) {
             const ch = json.data.challenge;
-            if (!isMounted) return;
+            if (!isMounted || authInFlightRef.current) return;
 
             setPendingChallenge((prev) => {
               if (prev && prev.id === ch.id) return prev;
@@ -418,7 +531,7 @@ export default function AuthenticatorScreen() {
       if (!isMounted) return;
       checkPendingChallenges();
       pollInterval = setInterval(checkPendingChallenges, 4000);
-    }, 1500);
+    }, 1000);
 
     return () => {
       isMounted = false;
@@ -427,13 +540,15 @@ export default function AuthenticatorScreen() {
         clearInterval(pollInterval);
       }
     };
-  }, [accounts, accountName, isLoaded]);
+  }, [accounts, accountName, isLoaded, isStartupComplete, showScanner]);
 
   // Authenticate with device biometrics or PIN to unlock TOTP codes
   const handleUnlockVault = async () => {
+    if (authInFlightRef.current) return;
+    authInFlightRef.current = true;
     try {
-      const hasHw = await LocalAuthentication.hasHardwareAsync();
-      const isEnr = await LocalAuthentication.isEnrolledAsync();
+      const hasHw = (await withTimeout(LocalAuthentication.hasHardwareAsync(), 2000)) ?? false;
+      const isEnr = (await withTimeout(LocalAuthentication.isEnrolledAsync(), 2000)) ?? false;
 
       if (!hasHw || !isEnr) {
         setIsVaultUnlocked(true);
@@ -462,6 +577,8 @@ export default function AuthenticatorScreen() {
     } catch (err) {
       console.warn("Biometric verification notice:", err);
       setIsVaultUnlocked(true);
+    } finally {
+      authInFlightRef.current = false;
     }
   };
 
@@ -488,12 +605,14 @@ export default function AuthenticatorScreen() {
 
   // Handle push approval with biometric verification gate
   const handleRespondChallenge = async (action: "APPROVE" | "DENY", selectedCode?: string) => {
-    if (!pendingChallenge) return;
+    if (!pendingChallenge || respondingChallenge) return;
 
     if (action === "APPROVE") {
+      if (authInFlightRef.current) return;
+      authInFlightRef.current = true;
       try {
-        const hasHardware = await LocalAuthentication.hasHardwareAsync();
-        const isEnrolled = await LocalAuthentication.isEnrolledAsync();
+        const hasHardware = (await withTimeout(LocalAuthentication.hasHardwareAsync(), 2000)) ?? false;
+        const isEnrolled = (await withTimeout(LocalAuthentication.isEnrolledAsync(), 2000)) ?? false;
         if (hasHardware && isEnrolled) {
           const authResult = await LocalAuthentication.authenticateAsync({
             promptMessage: "Authenticate to Confirm Sign-In",
@@ -508,11 +627,15 @@ export default function AuthenticatorScreen() {
         }
       } catch (err) {
         console.warn("Local authentication bypassed or not available:", err);
+      } finally {
+        authInFlightRef.current = false;
       }
     }
 
     setRespondingChallenge(true);
     try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 8000);
       const res = await fetch(`${API_BASE_URL}/api/mfa/challenge/respond`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -521,15 +644,17 @@ export default function AuthenticatorScreen() {
           action,
           selectedCode,
         }),
+        signal: controller.signal,
       });
+      clearTimeout(timer);
       const json = await res.json();
       if (json.success) {
+        setPendingChallenge(null);
         if (action === "APPROVE") {
           Alert.alert("Authorization Approved", "Sign-in approved successfully.");
         } else {
           Alert.alert("Authorization Denied", "Sign-in request denied.");
         }
-        setPendingChallenge(null);
       } else {
         Alert.alert("Verification Error", json.message || "Failed to process authorization.");
       }
@@ -581,7 +706,13 @@ export default function AuthenticatorScreen() {
       createdAt: Date.now(),
     };
 
-    setAccounts((prev) => [newAccount, ...prev]);
+    setAccounts((prev) => {
+      const updated = [newAccount, ...prev];
+      saveAccountsToVault(updated).catch((err) => {
+        console.error("Failed to persist enrolled account to vault:", err);
+      });
+      return updated;
+    });
     setAccountName("");
     setAccountIssuer("");
     setSecretKey("");
@@ -606,7 +737,13 @@ export default function AuthenticatorScreen() {
           text: "Remove",
           style: "destructive",
           onPress: () => {
-            setAccounts((prev) => prev.filter((acc) => acc.id !== id));
+            setAccounts((prev) => {
+              const updated = prev.filter((acc) => acc.id !== id);
+              saveAccountsToVault(updated).catch((err) => {
+                console.error("Failed to persist account removal to vault:", err);
+              });
+              return updated;
+            });
             recordMobileTelemetry({
               actionType: "REMOVE_KEY",
               details: `User deleted enrolled 2FA key for ${displayName}`,
@@ -630,6 +767,7 @@ export default function AuthenticatorScreen() {
         return;
       }
     }
+    scanLockRef.current = false;
     setShowScanner(true);
     recordMobileTelemetry({
       actionType: "OPEN_SCANNER",
@@ -638,7 +776,8 @@ export default function AuthenticatorScreen() {
   };
 
   const handleBarcodeScanned = ({ data }: { data: string }) => {
-    if (!data) return;
+    if (!data || scanLockRef.current) return;
+    scanLockRef.current = true;
 
     // Handle otpauth://totp/URI format
     if (data.startsWith("otpauth://")) {
@@ -685,8 +824,8 @@ export default function AuthenticatorScreen() {
       handleAddAccount("Enrolled Account", cleanSecret, "Sentinel IAM");
       Alert.alert("Account Paired", "Successfully enrolled 2FA secret key from QR code.");
     } else {
-      Alert.alert("Invalid QR Code", "Scanned code does not contain a valid Base32 2FA secret.");
       setShowScanner(false);
+      Alert.alert("Invalid QR Code", "Scanned code does not contain a valid Base32 2FA secret.");
     }
   };
 
@@ -961,123 +1100,137 @@ export default function AuthenticatorScreen() {
         }
       />
 
-      {/* Full-Screen QR Code Scanner Modal */}
-      <Modal
-        visible={showScanner}
-        animationType="slide"
-        onRequestClose={() => setShowScanner(false)}
-      >
-        <SafeAreaView style={styles.scannerContainer}>
-          <View style={styles.scannerNavbar}>
-            <View>
-              <Text style={styles.scannerNavTitle}>Scan Enrollment QR Code</Text>
-              <Text style={styles.scannerNavSubtitle}>Point camera at the Sentinel QR code</Text>
-            </View>
-            <TouchableOpacity
-              onPress={() => setShowScanner(false)}
-              style={styles.scannerCloseButton}
-            >
-              <Text style={styles.scannerCloseButtonText}>CLOSE</Text>
-            </TouchableOpacity>
-          </View>
-
-          {showScanner && permission?.granted ? (
-            <View style={styles.cameraWrapper}>
-              <CameraView
-                style={styles.cameraView}
-                barcodeScannerSettings={{
-                  barcodeTypes: ["qr"],
-                }}
-                onBarcodeScanned={handleBarcodeScanned}
-              />
-              <View style={styles.viewfinderOverlay}>
-                <View style={styles.viewfinderBox}>
-                  <View style={[styles.cornerBracket, styles.topLeftBracket]} />
-                  <View style={[styles.cornerBracket, styles.topRightBracket]} />
-                  <View style={[styles.cornerBracket, styles.bottomLeftBracket]} />
-                  <View style={[styles.cornerBracket, styles.bottomRightBracket]} />
-                </View>
-                <Text style={styles.viewfinderHint}>Align QR code within the frame</Text>
+      {/* Full-Screen QR Code Scanner Modal (Mounted only when active) */}
+      {showScanner && (
+        <Modal
+          visible={true}
+          animationType="slide"
+          onRequestClose={() => setShowScanner(false)}
+        >
+          <SafeAreaView style={styles.scannerContainer}>
+            <View style={styles.scannerNavbar}>
+              <View>
+                <Text style={styles.scannerNavTitle}>Scan Enrollment QR Code</Text>
+                <Text style={styles.scannerNavSubtitle}>Point camera at the Sentinel QR code</Text>
               </View>
-            </View>
-          ) : (
-            <View style={styles.cameraFallback}>
-              <Text style={styles.cameraFallbackText}>Initializing camera...</Text>
-            </View>
-          )}
-        </SafeAreaView>
-      </Modal>
-
-      {/* In-App Push Authorization Modal (Number Matching with Biometric Proof) */}
-      <Modal
-        visible={pendingChallenge !== null}
-        animationType="fade"
-        transparent={true}
-        onRequestClose={() => handleRespondChallenge("DENY")}
-      >
-        <View style={styles.pushModalOverlay}>
-          <View style={styles.pushModalCard}>
-            <View style={styles.pushHeaderRow}>
-              <View style={styles.pushStatusDot} />
-              <Text style={styles.pushModalTitle}>INCOMING SIGN-IN REQUEST</Text>
+              <TouchableOpacity
+                onPress={() => setShowScanner(false)}
+                style={styles.scannerCloseButton}
+              >
+                <Text style={styles.scannerCloseButtonText}>CLOSE</Text>
+              </TouchableOpacity>
             </View>
 
-            <View style={styles.pushDetailsBox}>
-              <View style={styles.pushIdentityStatusRow}>
-                <Text style={styles.pushOriginLabel}>APPLICATION</Text>
-                {accounts.some((a) => a.name && pendingChallenge?.email && a.name.trim().toLowerCase() === pendingChallenge.email.trim().toLowerCase()) ? (
-                  <View style={styles.verifiedIdentityBadge}>
-                    <View style={styles.verifiedIdentityDot} />
-                    <Text style={styles.verifiedIdentityText}>ENROLLED VAULT IDENTITY</Text>
+            {permission?.granted ? (
+              <View style={styles.cameraWrapper}>
+                <CameraView
+                  style={styles.cameraView}
+                  barcodeScannerSettings={{
+                    barcodeTypes: ["qr"],
+                  }}
+                  onBarcodeScanned={handleBarcodeScanned}
+                />
+                <View style={styles.viewfinderOverlay}>
+                  <View style={styles.viewfinderBox}>
+                    <View style={[styles.cornerBracket, styles.topLeftBracket]} />
+                    <View style={[styles.cornerBracket, styles.topRightBracket]} />
+                    <View style={[styles.cornerBracket, styles.bottomLeftBracket]} />
+                    <View style={[styles.cornerBracket, styles.bottomRightBracket]} />
                   </View>
-                ) : (
-                  <View style={styles.crossAccountWarningBadge}>
-                    <View style={styles.crossAccountWarningDot} />
-                    <Text style={styles.crossAccountWarningText}>UNENROLLED ACCOUNT</Text>
-                  </View>
+                  <Text style={styles.viewfinderHint}>Align QR code within the frame</Text>
+                </View>
+              </View>
+            ) : (
+              <View style={styles.cameraFallback}>
+                <Text style={styles.cameraFallbackText}>Initializing camera...</Text>
+              </View>
+            )}
+          </SafeAreaView>
+        </Modal>
+      )}
+
+      {/* In-App Push Authorization Modal (Mounted only when active) */}
+      {pendingChallenge !== null && (
+        <Modal
+          visible={true}
+          animationType="fade"
+          transparent={true}
+          onRequestClose={() => handleRespondChallenge("DENY")}
+        >
+          <View style={styles.pushModalOverlay}>
+            <View style={styles.pushModalCard}>
+              <View style={styles.pushHeaderRow}>
+                <View style={styles.pushStatusDot} />
+                <Text style={styles.pushModalTitle}>INCOMING SIGN-IN REQUEST</Text>
+              </View>
+
+              <View style={styles.pushDetailsBox}>
+                <View style={styles.pushIdentityStatusRow}>
+                  <Text style={styles.pushOriginLabel}>APPLICATION</Text>
+                  {accounts.some(
+                    (a) =>
+                      a.name &&
+                      pendingChallenge.email &&
+                      a.name.trim().toLowerCase() === pendingChallenge.email.trim().toLowerCase()
+                  ) ? (
+                    <View style={styles.verifiedIdentityBadge}>
+                      <View style={styles.verifiedIdentityDot} />
+                      <Text style={styles.verifiedIdentityText}>ENROLLED VAULT IDENTITY</Text>
+                    </View>
+                  ) : (
+                    <View style={styles.crossAccountWarningBadge}>
+                      <View style={styles.crossAccountWarningDot} />
+                      <Text style={styles.crossAccountWarningText}>UNENROLLED ACCOUNT</Text>
+                    </View>
+                  )}
+                </View>
+                <Text style={styles.pushOriginValue}>{pendingChallenge.clientOrigin}</Text>
+
+                <Text style={styles.pushEmailLabel}>ACCOUNT IDENTITY</Text>
+                <Text style={styles.pushEmailValue}>{pendingChallenge.email}</Text>
+
+                {!accounts.some(
+                  (a) =>
+                    a.name &&
+                    pendingChallenge.email &&
+                    a.name.trim().toLowerCase() === pendingChallenge.email.trim().toLowerCase()
+                ) && (
+                  <Text style={styles.crossAccountNotice}>
+                    Notice: This request is for an account not stored in this device vault. Confirm identity before approving.
+                  </Text>
                 )}
               </View>
-              <Text style={styles.pushOriginValue}>{pendingChallenge?.clientOrigin}</Text>
 
-              <Text style={styles.pushEmailLabel}>ACCOUNT IDENTITY</Text>
-              <Text style={styles.pushEmailValue}>{pendingChallenge?.email}</Text>
-
-              {!accounts.some((a) => a.name && pendingChallenge?.email && a.name.trim().toLowerCase() === pendingChallenge.email.trim().toLowerCase()) && (
-                <Text style={styles.crossAccountNotice}>
-                  Notice: This request is for an account not stored in this device vault. Confirm identity before approving.
-                </Text>
-              )}
-            </View>
-
-            <Text style={styles.pushPromptText}>
-              Select the number displayed on your browser screen to approve access (biometrics required):
-            </Text>
-
-            <View style={styles.numberOptionsRow}>
-              {pendingChallenge?.options.map((opt) => (
-                <TouchableOpacity
-                  key={opt}
-                  disabled={respondingChallenge}
-                  style={styles.numberOptionButton}
-                  onPress={() => handleRespondChallenge("APPROVE", opt)}
-                >
-                  <Text style={styles.numberOptionText}>{opt}</Text>
-                </TouchableOpacity>
-              ))}
-            </View>
-
-            <TouchableOpacity
-              disabled={respondingChallenge}
-              style={styles.denyButton}
-              onPress={() => handleRespondChallenge("DENY")}
-            >
-              <Text style={styles.denyButtonText}>
-                {respondingChallenge ? "PROCESSING..." : "DENY REQUEST"}
+              <Text style={styles.pushPromptText}>
+                Select the number displayed on your browser screen to approve access (biometrics required):
               </Text>
-            </TouchableOpacity>
+
+              <View style={styles.numberOptionsRow}>
+                {pendingChallenge.options.map((opt) => (
+                  <TouchableOpacity
+                    key={opt}
+                    disabled={respondingChallenge}
+                    style={styles.numberOptionButton}
+                    onPress={() => handleRespondChallenge("APPROVE", opt)}
+                  >
+                    <Text style={styles.numberOptionText}>{opt}</Text>
+                  </TouchableOpacity>
+                ))}
+              </View>
+
+              <TouchableOpacity
+                disabled={respondingChallenge}
+                style={styles.denyButton}
+                onPress={() => handleRespondChallenge("DENY")}
+              >
+                <Text style={styles.denyButtonText}>
+                  {respondingChallenge ? "PROCESSING..." : "DENY REQUEST"}
+                </Text>
+              </TouchableOpacity>
+            </View>
           </View>
-        </View>
-      </Modal>
+        </Modal>
+      )}
     </SafeAreaView>
   );
 }
