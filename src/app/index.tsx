@@ -68,6 +68,7 @@ export default function AuthenticatorScreen() {
   // Biometric Inherence Factor State
   const [hasBiometricHardware, setHasBiometricHardware] = useState(false);
   const [biometricEnrolled, setBiometricEnrolled] = useState(false);
+  const [biometricTypeLabel, setBiometricTypeLabel] = useState<string>("BIOMETRIC");
   const [requireBiometrics, setRequireBiometrics] = useState(true);
   const [isVaultUnlocked, setIsVaultUnlocked] = useState(false);
 
@@ -152,6 +153,25 @@ export default function AuthenticatorScreen() {
     };
   }, []);
 
+  // Proactively request camera permission on initial app mount
+  useEffect(() => {
+    let isCancelled = false;
+    const cameraPermTimer = setTimeout(async () => {
+      try {
+        if (!permission?.granted && !isCancelled) {
+          await requestPermission();
+        }
+      } catch (camErr) {
+        console.warn("Initial camera permission notice:", camErr);
+      }
+    }, 800);
+
+    return () => {
+      isCancelled = true;
+      clearTimeout(cameraPermTimer);
+    };
+  }, [permission?.granted]);
+
   // Sync device push token to backend for enrolled accounts with proof of possession
   useEffect(() => {
     if (!pushToken) return;
@@ -229,6 +249,22 @@ export default function AuthenticatorScreen() {
           setBiometricEnrolled(isEnr);
         }
 
+        const authTypes: LocalAuthentication.AuthenticationType[] =
+          (await LocalAuthentication.supportedAuthenticationTypesAsync().catch(() => [])) || [];
+        if (isMounted) {
+          if (authTypes.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) {
+            setBiometricTypeLabel("FINGERPRINT");
+          } else if (authTypes.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
+            setBiometricTypeLabel("FACE ID");
+          } else if (authTypes.includes(LocalAuthentication.AuthenticationType.IRIS)) {
+            setBiometricTypeLabel("IRIS");
+          } else if (hasHw) {
+            setBiometricTypeLabel("BIOMETRIC");
+          } else {
+            setBiometricTypeLabel("DEVICE PIN");
+          }
+        }
+
         const settings = await loadVaultSettings();
         if (isMounted) {
           setRequireBiometrics(settings.requireBiometrics);
@@ -243,6 +279,26 @@ export default function AuthenticatorScreen() {
         const storedAccounts = await loadAccountsFromVault();
         if (isMounted) {
           setAccounts(storedAccounts);
+        }
+
+        // Auto-prompt native fingerprint scanner or device PIN on application launch
+        if (settings.requireBiometrics && hasHw && isEnr) {
+          setTimeout(async () => {
+            if (!isMounted) return;
+            try {
+              const authResult = await LocalAuthentication.authenticateAsync({
+                promptMessage: "Authenticate to Unlock Sentinel Authenticator",
+                cancelLabel: "Cancel",
+                fallbackLabel: "Use Device PIN",
+                disableDeviceFallback: false,
+              });
+              if (authResult.success && isMounted) {
+                setIsVaultUnlocked(true);
+              }
+            } catch (authErr) {
+              console.warn("Startup biometric authentication notice:", authErr);
+            }
+          }, 350);
         }
       } catch (err) {
         console.error("Failed to initialize security vault:", err);
@@ -671,7 +727,7 @@ export default function AuthenticatorScreen() {
                   ]}
                 />
                 <Text style={styles.statusPillText}>
-                  {requireBiometrics && hasBiometricHardware ? "BIOMETRICS: ON" : "BIOMETRICS: OFF"}
+                  {requireBiometrics && hasBiometricHardware ? `${biometricTypeLabel}: ON` : "BIOMETRICS: OFF"}
                 </Text>
               </View>
 
@@ -695,7 +751,7 @@ export default function AuthenticatorScreen() {
               <Text style={styles.vaultCardSubtitle}>
                 {isVaultUnlocked
                   ? "Inherence factor validated. TOTP passcodes visible."
-                  : "Biometric authentication required to reveal 6-digit codes."}
+                  : `${biometricTypeLabel} authentication required to reveal 6-digit codes.`}
               </Text>
             </View>
             {isVaultUnlocked ? (
@@ -710,7 +766,7 @@ export default function AuthenticatorScreen() {
           </View>
           <TouchableOpacity style={styles.biometricToggleRow} onPress={handleToggleBiometrics}>
             <Text style={styles.biometricToggleText}>
-              Security Policy: {requireBiometrics ? "Enforce Biometrics to View Codes" : "Allow Direct Access"}
+              Security Policy: {requireBiometrics ? `Enforce ${biometricTypeLabel} to View Codes` : "Allow Direct Access"}
             </Text>
             <Text style={styles.biometricToggleAction}>[CHANGE]</Text>
           </TouchableOpacity>
@@ -743,7 +799,7 @@ export default function AuthenticatorScreen() {
                   enrollmentTab === "SCAN" && styles.segmentTabTextActive,
                 ]}
               >
-                QR CAMERA
+                SCAN QR
               </Text>
             </TouchableOpacity>
             <TouchableOpacity
@@ -756,7 +812,7 @@ export default function AuthenticatorScreen() {
                   enrollmentTab === "MANUAL" && styles.segmentTabTextActive,
                 ]}
               >
-                MANUAL ENTRY
+                MANUAL
               </Text>
             </TouchableOpacity>
           </View>
@@ -1192,19 +1248,23 @@ const styles = StyleSheet.create({
   },
   biometricToggleRow: {
     flexDirection: "row",
+    flexWrap: "wrap",
     justifyContent: "space-between",
     alignItems: "center",
-    marginTop: 6,
-    paddingTop: 6,
+    gap: 8,
+    marginTop: 8,
+    paddingTop: 8,
     borderTopWidth: 1,
-    borderTopColor: "rgba(255, 255, 255, 0.06)",
+    borderTopColor: "rgba(255, 255, 255, 0.08)",
   },
   biometricToggleText: {
-    fontSize: 9,
+    fontSize: 9.5,
     color: "#64748b",
+    flexShrink: 1,
+    marginRight: 6,
   },
   biometricToggleAction: {
-    fontSize: 9,
+    fontSize: 9.5,
     fontWeight: "700",
     color: "#54f4fc",
     letterSpacing: 0.5,
@@ -1258,6 +1318,8 @@ const styles = StyleSheet.create({
     flexDirection: "row",
     justifyContent: "space-between",
     alignItems: "center",
+    flexWrap: "wrap",
+    gap: 8,
     marginBottom: 10,
   },
   enrollmentTitle: {
@@ -1265,6 +1327,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
     letterSpacing: 1.2,
     color: "#54f4fc",
+    flexShrink: 1,
   },
   segmentContainer: {
     flexDirection: "row",
@@ -1272,11 +1335,11 @@ const styles = StyleSheet.create({
     borderRadius: 6,
     padding: 2,
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.15)",
+    borderColor: "rgba(84, 244, 252, 0.2)",
   },
   segmentTab: {
-    paddingHorizontal: 8,
-    paddingVertical: 4,
+    paddingHorizontal: 10,
+    paddingVertical: 5,
     borderRadius: 4,
   },
   segmentTabActive: {
