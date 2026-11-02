@@ -32,7 +32,6 @@ import {
   saveVaultSettings,
 } from "@/utils/vault";
 
-const STARTUP_PERMS_PROMPTED_KEY = "@sentinel_startup_perms_v1";
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -46,60 +45,7 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null
   ]);
 }
 
-function waitForAfterInteractions(maxWaitMs = 900): Promise<void> {
-  return new Promise((resolve) => {
-    let settled = false;
-    const finish = () => {
-      if (!settled) {
-        settled = true;
-        resolve();
-      }
-    };
-    const fallbackTimer = setTimeout(finish, maxWaitMs);
-    try {
-      InteractionManager.runAfterInteractions(() => {
-        clearTimeout(fallbackTimer);
-        finish();
-      });
-    } catch {
-      clearTimeout(fallbackTimer);
-      finish();
-    }
-  });
-}
 
-function waitForActiveAppState(
-  isCancelledRef: { current: boolean },
-  maxWaitMs = 8000
-): Promise<boolean> {
-  if (isCancelledRef.current) return Promise.resolve(false);
-  if (AppState.currentState === "active") return Promise.resolve(true);
-
-  return new Promise((resolve) => {
-    let resolved = false;
-    let subscription: ReturnType<typeof AppState.addEventListener> | null = null;
-
-    const cleanupAndResolve = (active: boolean) => {
-      if (resolved) return;
-      resolved = true;
-      clearTimeout(timeoutId);
-      subscription?.remove();
-      resolve(active && !isCancelledRef.current);
-    };
-
-    const timeoutId = setTimeout(() => {
-      cleanupAndResolve(AppState.currentState === "active");
-    }, maxWaitMs);
-
-    subscription = AppState.addEventListener("change", (nextState) => {
-      if (isCancelledRef.current) {
-        cleanupAndResolve(false);
-      } else if (nextState === "active") {
-        cleanupAndResolve(true);
-      }
-    });
-  });
-}
 
 const API_BASE_URL = "https://backend-pi68.onrender.com";
 
@@ -148,30 +94,30 @@ export default function AuthenticatorScreen() {
   const getCameraPermissionRef = useRef(getCameraPermission);
   getCameraPermissionRef.current = getCameraPermission;
 
-  // Unified, strictly sequential startup lifecycle to prevent native Activity / BiometricPrompt ANR collisions
+  // Non-blocking, defensive startup initialization lifecycle
   useEffect(() => {
-    const isCancelledRef = { current: false };
+    let isMounted = true;
 
-    const runSequentialStartup = async () => {
+    const initializeStartup = async () => {
       let hasHw = false;
       let isEnr = false;
       let enforceBio = true;
 
       try {
-        // Phase 1: Non-blocking read-only vault and biometric hardware capability hydration
-        const isHwAvailable = (await withTimeout(isHardwareVaultAvailable(), 2000)) ?? false;
-        if (isCancelledRef.current) return;
+        // Phase 1: Hydrate hardware vault capability, biometric state, and stored accounts
+        const isHwAvailable = (await withTimeout(isHardwareVaultAvailable(), 1500)) ?? false;
+        if (!isMounted) return;
         setIsHardwareVault(isHwAvailable);
 
-        hasHw = (await withTimeout(LocalAuthentication.hasHardwareAsync(), 2000)) ?? false;
-        isEnr = (await withTimeout(LocalAuthentication.isEnrolledAsync(), 2000)) ?? false;
-        if (isCancelledRef.current) return;
+        hasHw = (await withTimeout(LocalAuthentication.hasHardwareAsync(), 1500)) ?? false;
+        isEnr = (await withTimeout(LocalAuthentication.isEnrolledAsync(), 1500)) ?? false;
+        if (!isMounted) return;
         setHasBiometricHardware(hasHw);
         setBiometricEnrolled(isEnr);
 
         const authTypes: LocalAuthentication.AuthenticationType[] =
-          (await withTimeout(LocalAuthentication.supportedAuthenticationTypesAsync(), 2000)) ?? [];
-        if (!isCancelledRef.current) {
+          (await withTimeout(LocalAuthentication.supportedAuthenticationTypesAsync(), 1500)) ?? [];
+        if (isMounted) {
           if (authTypes.includes(LocalAuthentication.AuthenticationType.FINGERPRINT)) {
             setBiometricTypeLabel("FINGERPRINT");
           } else if (authTypes.includes(LocalAuthentication.AuthenticationType.FACIAL_RECOGNITION)) {
@@ -185,11 +131,11 @@ export default function AuthenticatorScreen() {
           }
         }
 
-        const settings = (await withTimeout(loadVaultSettings(), 2500)) ?? {
+        const settings = (await withTimeout(loadVaultSettings(), 2000)) ?? {
           requireBiometrics: true,
         };
         enforceBio = settings.requireBiometrics;
-        if (!isCancelledRef.current) {
+        if (isMounted) {
           setRequireBiometrics(enforceBio);
           if (!enforceBio || !hasHw || !isEnr) {
             setIsVaultUnlocked(true);
@@ -198,29 +144,25 @@ export default function AuthenticatorScreen() {
           }
         }
 
-        const storedAccounts = (await withTimeout(loadAccountsFromVault(), 2500)) ?? [];
-        if (!isCancelledRef.current) {
+        const storedAccounts = (await withTimeout(loadAccountsFromVault(), 2000)) ?? [];
+        if (isMounted) {
           setAccounts(storedAccounts);
-          setIsLoaded(true);
         }
       } catch (err) {
-        console.error("Failed to initialize security vault:", err);
-        if (!isCancelledRef.current) {
+        console.warn("Security vault initialization warning:", err);
+      } finally {
+        if (isMounted) {
           setIsLoaded(true);
+          setIsStartupComplete(true);
+        }
+        try {
+          SplashScreen.hideAsync().catch(() => {});
+        } catch {
+          // Ignore splash screen lifecycle notice
         }
       }
 
-      // Phase 2: Dismiss splash screen and wait for Android 15 SplashScreenView exit animation to fully detach
-      try {
-        SplashScreen.hideAsync().catch(() => {});
-      } catch {
-        // Ignore splash lifecycle notice
-      }
-      await waitForAfterInteractions(900);
-      await delay(900);
-      if (isCancelledRef.current) return;
-
-      // Phase 3: Configure notification channel and acquire startup permissions in a single atomic OS dialog
+      // Phase 2: Setup push notification channel and acquire token quietly without blocking the UI
       try {
         Notifications.setNotificationHandler({
           handleNotification: async () => ({
@@ -231,13 +173,8 @@ export default function AuthenticatorScreen() {
             shouldShowList: true,
           }),
         });
-      } catch (handlerErr) {
-        console.warn("Notifications handler initialization notice:", handlerErr);
-      }
 
-      let notificationsGranted = false;
-      if (Platform.OS === "android") {
-        try {
+        if (Platform.OS === "android") {
           await withTimeout(
             Notifications.setNotificationChannelAsync("mfa-alerts", {
               name: "MFA Security Challenges",
@@ -246,113 +183,32 @@ export default function AuthenticatorScreen() {
               lightColor: "#54f4fc",
               sound: "default",
             }),
-            2000
-          );
-        } catch (chErr) {
-          console.warn("Notification channel setup notice:", chErr);
-        }
-
-        try {
-          const notifPerm = PermissionsAndroid.PERMISSIONS.POST_NOTIFICATIONS;
-          const camPerm = PermissionsAndroid.PERMISSIONS.CAMERA;
-
-          const hasNotif =
-            (await withTimeout(PermissionsAndroid.check(notifPerm), 1500)) ?? false;
-          const hasCam =
-            (await withTimeout(PermissionsAndroid.check(camPerm), 1500)) ?? false;
-          notificationsGranted = hasNotif;
-
-          const alreadyPrompted = await withTimeout(
-            AsyncStorage.getItem(STARTUP_PERMS_PROMPTED_KEY),
             1500
           );
-
-          const missingPerms: Permission[] = [];
-          if (!hasNotif) missingPerms.push(notifPerm);
-          if (!hasCam) missingPerms.push(camPerm);
-
-          if (missingPerms.length > 0 && !alreadyPrompted && !isCancelledRef.current) {
-            const appReadyForPerms = await waitForActiveAppState(isCancelledRef, 8000);
-            if (appReadyForPerms && !isCancelledRef.current) {
-              const permResults = await PermissionsAndroid.requestMultiple(missingPerms);
-              notificationsGranted =
-                permResults[notifPerm] === PermissionsAndroid.RESULTS.GRANTED || hasNotif;
-
-              await AsyncStorage.setItem(STARTUP_PERMS_PROMPTED_KEY, "1").catch(() => {});
-              await withTimeout(getCameraPermissionRef.current(), 1500);
-
-              // Allow GrantPermissionsActivity window transition to fully close and return focus to MainActivity
-              await waitForActiveAppState(isCancelledRef, 8000);
-              await waitForAfterInteractions(600);
-              await delay(850);
-            }
-          }
-        } catch (permErr) {
-          console.warn("Startup permission acquisition notice:", permErr);
         }
-      } else {
-        const permStatus = await withTimeout(Notifications.getPermissionsAsync(), 2000);
-        notificationsGranted = permStatus?.status === "granted";
-      }
 
-      if (isCancelledRef.current) return;
-
-      // Phase 4: Prompt hardware biometrics or PIN strictly after all permission dialogs have settled
-      if (enforceBio && hasHw && isEnr && !authInFlightRef.current && !isCancelledRef.current) {
-        const appReadyForBio = await waitForActiveAppState(isCancelledRef, 6000);
-        if (
-          appReadyForBio &&
-          AppState.currentState === "active" &&
-          !authInFlightRef.current &&
-          !isCancelledRef.current
-        ) {
-          authInFlightRef.current = true;
-          try {
-            const authResult = await LocalAuthentication.authenticateAsync({
-              promptMessage: "Authenticate to Unlock Sentinel Authenticator",
-              cancelLabel: "Cancel",
-              fallbackLabel: "Use Device PIN",
-              disableDeviceFallback: false,
-            });
-            if (authResult.success && !isCancelledRef.current) {
-              setIsVaultUnlocked(true);
-            }
-          } catch (authErr) {
-            console.warn("Startup biometric authentication notice:", authErr);
-          } finally {
-            authInFlightRef.current = false;
-          }
-          await delay(300);
+        const permStatus = await withTimeout(Notifications.getPermissionsAsync(), 1500);
+        let granted = permStatus?.status === "granted";
+        if (!granted && Platform.OS !== "android") {
+          const reqRes = await withTimeout(Notifications.requestPermissionsAsync(), 2000);
+          granted = reqRes?.status === "granted";
         }
-      }
 
-      if (isCancelledRef.current) return;
-
-      // Phase 5: Acquire FCM push token quietly in background after interactive prompts finish
-      if (notificationsGranted) {
-        try {
-          const deviceTokenRes = await withTimeout(Notifications.getDevicePushTokenAsync(), 3500);
-          if (deviceTokenRes?.data && !isCancelledRef.current) {
+        if (granted && isMounted) {
+          const deviceTokenRes = await withTimeout(Notifications.getDevicePushTokenAsync(), 2500);
+          if (deviceTokenRes?.data && isMounted) {
             setPushToken(String(deviceTokenRes.data));
           }
-        } catch {
-          // Ignore device push token fallback notice
         }
-      }
-
-      if (!isCancelledRef.current) {
-        setIsStartupComplete(true);
+      } catch (pushErr) {
+        console.warn("Background notification registration notice:", pushErr);
       }
     };
 
-    runSequentialStartup().finally(() => {
-      if (!isCancelledRef.current) {
-        setIsStartupComplete(true);
-      }
-    });
+    initializeStartup();
 
     return () => {
-      isCancelledRef.current = true;
+      isMounted = false;
     };
   }, []);
 
