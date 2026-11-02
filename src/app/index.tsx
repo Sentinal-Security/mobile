@@ -18,6 +18,7 @@ import {
   type NativeScrollEvent,
 } from "react-native";
 import * as WebBrowser from "expo-web-browser";
+import * as Clipboard from "expo-clipboard";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -69,6 +70,7 @@ export default function AuthenticatorScreen() {
   const [isStartupComplete, setIsStartupComplete] = useState(false);
   const [isHardwareVault, setIsHardwareVault] = useState<boolean | null>(null);
   const [activeTab, setActiveTab] = useState<"CODES" | "PAIR" | "SECURITY">("CODES");
+  const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
   const pagerRef = useRef<ScrollView>(null);
 
   // Biometric Inherence Factor State
@@ -406,6 +408,19 @@ export default function AuthenticatorScreen() {
   }, [accounts, accountName, isLoaded, isStartupComplete, showScanner]);
 
 
+
+  const handleCopyCode = async (id: string, codeToCopy: string) => {
+    try {
+      await Clipboard.setStringAsync(codeToCopy.replace(/\s/g, ""));
+      setCopiedCodeId(id);
+      setTimeout(() => {
+        setCopiedCodeId((prev) => (prev === id ? null : prev));
+      }, 2000);
+    } catch {
+      Alert.alert("Copied", `Passcode ${codeToCopy} copied.`);
+    }
+  };
+
   const handleSelectTab = (tab: "CODES" | "PAIR" | "SECURITY") => {
     setActiveTab(tab);
     const index = tab === "CODES" ? 0 : tab === "PAIR" ? 1 : 2;
@@ -730,7 +745,7 @@ export default function AuthenticatorScreen() {
           </View>
           <Text style={styles.lockTitle}>Sentinel Authenticator</Text>
           <Text style={styles.lockSubtitle}>
-            Authentication required to access enterprise TOTP passcodes and security verification tools.
+            Biometric verification or device screen lock required to access enterprise TOTP passcodes and verification tools.
           </Text>
 
           <TouchableOpacity style={styles.primaryUnlockButton} onPress={handleUnlockApp}>
@@ -752,7 +767,7 @@ export default function AuthenticatorScreen() {
 
   return (
     <SafeAreaView style={styles.container}>
-      {/* Centered Enterprise Top Header */}
+      {/* Top Header Bar */}
       <View style={styles.headerContainer}>
         <View style={styles.headerRow}>
           <Image
@@ -774,39 +789,9 @@ export default function AuthenticatorScreen() {
             </TouchableOpacity>
           )}
         </View>
-
-        {/* Global Navigation Tabs (Swipe or Tap) */}
-        <View style={styles.navBar}>
-          <TouchableOpacity
-            style={[styles.navTab, activeTab === "CODES" && styles.navTabActive]}
-            onPress={() => handleSelectTab("CODES")}
-          >
-            <Text style={[styles.navTabText, activeTab === "CODES" && styles.navTabTextActive]}>
-              CODES ({accounts.length})
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.navTab, activeTab === "PAIR" && styles.navTabActive]}
-            onPress={() => handleSelectTab("PAIR")}
-          >
-            <Text style={[styles.navTabText, activeTab === "PAIR" && styles.navTabTextActive]}>
-              PAIR KEY
-            </Text>
-          </TouchableOpacity>
-
-          <TouchableOpacity
-            style={[styles.navTab, activeTab === "SECURITY" && styles.navTabActive]}
-            onPress={() => handleSelectTab("SECURITY")}
-          >
-            <Text style={[styles.navTabText, activeTab === "SECURITY" && styles.navTabTextActive]}>
-              SYSTEM
-            </Text>
-          </TouchableOpacity>
-        </View>
       </View>
 
-      {/* Horizontal Swipable Paged Container */}
+      {/* Horizontal Swipable Paged Container (Main Canvas) */}
       <ScrollView
         ref={pagerRef}
         horizontal
@@ -815,78 +800,93 @@ export default function AuthenticatorScreen() {
         onMomentumScrollEnd={handleScrollEnd}
         style={styles.pagerContainer}
       >
-        {/* PAGE 1: CODES */}
+        {/* TAB 1: PASSCODES */}
         <View style={styles.pageItem}>
           {accounts.length > 0 ? (
-            <View style={styles.pageContentFlex}>
-              {/* Token Countdown Bar (Shown only when enrolled accounts exist) */}
-              <View style={styles.timerCard}>
-                <View style={styles.timerHeaderRow}>
-                  <Text style={styles.timerLabel}>CODE REFRESH CYCLE</Text>
-                  <Text style={styles.timerCountdown}>{remainingSeconds}s remaining</Text>
-                </View>
-                <View style={styles.progressTrack}>
-                  <View style={[styles.progressBar, { width: `${progressPercent}%` }]} />
-                </View>
-              </View>
+            <FlatList
+              data={accounts}
+              keyExtractor={(item) => item.id}
+              contentContainerStyle={styles.listContentWithDock}
+              showsVerticalScrollIndicator={false}
+              renderItem={({ item }) => {
+                let code = "------";
+                try {
+                  code = generateTotp(item.secret);
+                } catch {
+                  code = "------";
+                }
+                const formattedCode =
+                  code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
+                const isCopied = copiedCodeId === item.id;
 
-              <FlatList
-                data={accounts}
-                keyExtractor={(item) => item.id}
-                contentContainerStyle={styles.listContent}
-                renderItem={({ item }) => {
-                  let code = "------";
-                  try {
-                    code = generateTotp(item.secret);
-                  } catch {
-                    code = "------";
-                  }
-                  const formattedCode =
-                    code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
-
-                  return (
-                    <View style={styles.accountCard}>
-                      <View style={styles.accountTopRow}>
-                        <View style={styles.accountIdentityGroup}>
-                          <Text style={styles.accountName} numberOfLines={1}>
-                            {item.name}
-                          </Text>
-                          {item.issuer && (
-                            <View style={styles.issuerBadge}>
-                              <Text style={styles.issuerBadgeText}>{item.issuer.toUpperCase()}</Text>
-                            </View>
-                          )}
-                        </View>
-                        <View style={styles.protocolBadge}>
-                          <Text style={styles.protocolBadgeText}>SHA-1 / 30S</Text>
-                        </View>
+                return (
+                  <TouchableOpacity
+                    activeOpacity={0.88}
+                    style={[styles.accountCard, isCopied && styles.accountCardCopied]}
+                    onPress={() => handleCopyCode(item.id, code)}
+                  >
+                    {/* Header: Issuer + Algorithm badge */}
+                    <View style={styles.accountTopRow}>
+                      <View style={styles.accountIdentityGroup}>
+                        <Text style={styles.accountName} numberOfLines={1}>
+                          {item.name}
+                        </Text>
+                        {item.issuer && (
+                          <View style={styles.issuerBadge}>
+                            <Text style={styles.issuerBadgeText}>{item.issuer.toUpperCase()}</Text>
+                          </View>
+                        )}
                       </View>
-
-                      <View style={styles.tokenRow}>
-                        <Text style={styles.totpToken}>{formattedCode}</Text>
-                        <TouchableOpacity
-                          style={styles.removeButton}
-                          onPress={() => confirmDeleteAccount(item.id, item.name, item.issuer)}
-                        >
-                          <Text style={styles.removeButtonText}>REMOVE</Text>
-                        </TouchableOpacity>
+                      <View style={styles.protocolBadge}>
+                        <Text style={styles.protocolBadgeText}>SHA-1 / 30S</Text>
                       </View>
+                    </View>
 
+                    {/* Middle: Large Monospace Passcode & Quick Action */}
+                    <View style={styles.tokenRow}>
+                      <Text style={styles.totpToken}>{formattedCode}</Text>
+                      <View style={[styles.copyPill, isCopied && styles.copyPillActive]}>
+                        <Text style={[styles.copyPillText, isCopied && styles.copyPillTextActive]}>
+                          {isCopied ? "COPIED" : "TAP TO COPY"}
+                        </Text>
+                      </View>
+                    </View>
+
+                    {/* Footer: Per-Card Synchronized Progress Line & Remaining Seconds */}
+                    <View style={styles.cardProgressRow}>
+                      <View style={styles.cardProgressTrack}>
+                        <View style={[styles.cardProgressBar, { width: `${progressPercent}%` }]} />
+                      </View>
+                      <Text style={styles.cardSecondsText}>{remainingSeconds}s</Text>
+                    </View>
+
+                    {/* Bottom Utility Row */}
+                    <View style={styles.cardUtilityRow}>
                       <Text style={styles.secretHintText} numberOfLines={1}>
                         KEY: {item.secret.slice(0, 4)}••••••••{item.secret.slice(-4)}
                       </Text>
+                      <TouchableOpacity
+                        style={styles.cardDeleteBtn}
+                        onPress={() => confirmDeleteAccount(item.id, item.name, item.issuer)}
+                      >
+                        <Text style={styles.cardDeleteBtnText}>REMOVE</Text>
+                      </TouchableOpacity>
                     </View>
-                  );
-                }}
-              />
-            </View>
+                  </TouchableOpacity>
+                );
+              }}
+            />
           ) : (
-            <ScrollView style={styles.pageContentFlex} contentContainerStyle={styles.onboardingContainer}>
+            <ScrollView
+              style={styles.pageContentFlex}
+              contentContainerStyle={styles.onboardingContainer}
+              showsVerticalScrollIndicator={false}
+            >
               <View style={styles.welcomeCard}>
                 <View style={styles.welcomeIconShield} />
-                <Text style={styles.welcomeTitle}>WELCOME TO SENTINEL</Text>
+                <Text style={styles.welcomeTitle}>SENTINEL AUTHENTICATOR</Text>
                 <Text style={styles.welcomeDescription}>
-                  Your hardware-backed Multi-Factor Authenticator (MFA) device. Protect your enterprise identities with RFC 6238 time-based passcodes and real-time out-of-band push verifications.
+                  Enterprise-grade Identity and Multi-Factor Authentication. Your device functions as a physical possession factor protected by hardware Keystore cryptography.
                 </Text>
 
                 <View style={styles.welcomeActionsGroup}>
@@ -894,7 +894,7 @@ export default function AuthenticatorScreen() {
                     style={styles.welcomePrimaryBtn}
                     onPress={() => handleSelectTab("PAIR")}
                   >
-                    <Text style={styles.welcomePrimaryBtnText}>PAIR FIRST ACCOUNT KEY</Text>
+                    <Text style={styles.welcomePrimaryBtnText}>+ PAIR ACCOUNT KEY</Text>
                   </TouchableOpacity>
 
                   <TouchableOpacity
@@ -907,24 +907,28 @@ export default function AuthenticatorScreen() {
               </View>
 
               <View style={styles.instructionCard}>
-                <Text style={styles.instructionHeading}>HOW TO GET STARTED</Text>
+                <Text style={styles.instructionHeading}>SETUP INSTRUCTIONS</Text>
                 <Text style={styles.instructionStep}>
-                  1. Sign in to the Sentinel Web Portal on your computer.
+                  1. Log in to the Sentinel Web Portal at web-beta-orcin-33.vercel.app.
                 </Text>
                 <Text style={styles.instructionStep}>
-                  2. Navigate to your Security & MFA settings and select "Pair Authenticator Device".
+                  2. Go to your User Dashboard and select "Pair Mobile Authenticator".
                 </Text>
                 <Text style={styles.instructionStep}>
-                  3. Swipe to "PAIR KEY" or click above to scan the displayed QR code.
+                  3. Tap "+ PAIR KEY" in the bottom dock and scan your enrollment QR code.
                 </Text>
               </View>
             </ScrollView>
           )}
         </View>
 
-        {/* PAGE 2: PAIR KEY */}
+        {/* TAB 2: PAIR KEY */}
         <View style={styles.pageItem}>
-          <ScrollView style={styles.pageContentFlex} contentContainerStyle={styles.scrollPadding}>
+          <ScrollView
+            style={styles.pageContentFlex}
+            contentContainerStyle={styles.scrollPaddingWithDock}
+            showsVerticalScrollIndicator={false}
+          >
             <View style={styles.enrollmentCard}>
               <View style={styles.enrollmentHeader}>
                 <Text style={styles.enrollmentTitle}>ENROLL 2FA KEY</Text>
@@ -961,7 +965,7 @@ export default function AuthenticatorScreen() {
               {enrollmentTab === "SCAN" ? (
                 <View>
                   <Text style={styles.modeDescriptionText}>
-                    Scan an enrollment QR code from the Sentinel Web Portal to automatically pair via the otpauth protocol.
+                    Scan an enrollment QR code directly from the Sentinel Web Portal to automatically pair via the otpauth standard.
                   </Text>
                   <TouchableOpacity style={styles.primaryScanButton} onPress={handleOpenScanner}>
                     <Text style={styles.primaryScanButtonText}>LAUNCH CAMERA SCANNER</Text>
@@ -970,12 +974,12 @@ export default function AuthenticatorScreen() {
               ) : (
                 <View>
                   <Text style={styles.modeDescriptionText}>
-                    Enter account details and RFC 6238 Base32 secret key manually for camera-less provisioning.
+                    Enter account identity and Base32 secret key manually for camera-less provisioning.
                   </Text>
 
                   <TextInput
                     style={styles.inputField}
-                    placeholder="Account Identity / Email (e.g. user@domain.com)"
+                    placeholder="Account Email (e.g. user@domain.com)"
                     placeholderTextColor="#64748b"
                     value={accountName}
                     onChangeText={setAccountName}
@@ -984,7 +988,7 @@ export default function AuthenticatorScreen() {
                   />
                   <TextInput
                     style={styles.inputField}
-                    placeholder="Issuer / Organization (e.g. Sentinel Security, Google)"
+                    placeholder="Issuer Organization (e.g. Sentinel IAM)"
                     placeholderTextColor="#64748b"
                     value={accountIssuer}
                     onChangeText={setAccountIssuer}
@@ -1027,9 +1031,13 @@ export default function AuthenticatorScreen() {
           </ScrollView>
         </View>
 
-        {/* PAGE 3: SYSTEM & SECURITY */}
+        {/* TAB 3: SYSTEM */}
         <View style={styles.pageItem}>
-          <ScrollView style={styles.pageContentFlex} contentContainerStyle={styles.scrollPadding}>
+          <ScrollView
+            style={styles.pageContentFlex}
+            contentContainerStyle={styles.scrollPaddingWithDock}
+            showsVerticalScrollIndicator={false}
+          >
             <View style={styles.securitySectionCard}>
               <Text style={styles.securitySectionTitle}>SECURITY HARDWARE DIAGNOSTICS</Text>
 
@@ -1099,6 +1107,38 @@ export default function AuthenticatorScreen() {
           </ScrollView>
         </View>
       </ScrollView>
+
+      {/* Industry Standard Bottom Floating Dock */}
+      <View style={styles.bottomDockContainer}>
+        <View style={styles.bottomDock}>
+          <TouchableOpacity
+            style={[styles.dockTab, activeTab === "CODES" && styles.dockTabActive]}
+            onPress={() => handleSelectTab("CODES")}
+          >
+            <Text style={[styles.dockTabText, activeTab === "CODES" && styles.dockTabTextActive]}>
+              PASSCODES
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.dockTab, activeTab === "PAIR" && styles.dockTabActive]}
+            onPress={() => handleSelectTab("PAIR")}
+          >
+            <Text style={[styles.dockTabText, activeTab === "PAIR" && styles.dockTabTextActive]}>
+              + PAIR KEY
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.dockTab, activeTab === "SECURITY" && styles.dockTabActive]}
+            onPress={() => handleSelectTab("SECURITY")}
+          >
+            <Text style={[styles.dockTabText, activeTab === "SECURITY" && styles.dockTabTextActive]}>
+              SYSTEM
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
 
       {/* Full-Screen QR Code Scanner Modal (Mounted only when active) */}
       {showScanner && (
@@ -1236,6 +1276,126 @@ export default function AuthenticatorScreen() {
 }
 
 const styles = StyleSheet.create({
+  bottomDockContainer: {
+    position: "absolute",
+    bottom: 16,
+    left: 16,
+    right: 16,
+    alignItems: "center",
+  },
+  bottomDock: {
+    flexDirection: "row",
+    backgroundColor: "rgba(7, 12, 22, 0.95)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.3)",
+    borderRadius: 30,
+    padding: 4,
+    width: "100%",
+    maxWidth: 420,
+    shadowColor: "#000",
+    shadowOffset: { width: 0, height: 6 },
+    shadowOpacity: 0.45,
+    shadowRadius: 10,
+    elevation: 8,
+  },
+  dockTab: {
+    flex: 1,
+    paddingVertical: 10,
+    alignItems: "center",
+    justifyContent: "center",
+    borderRadius: 24,
+  },
+  dockTabActive: {
+    backgroundColor: "#54f4fc",
+  },
+  dockTabText: {
+    fontSize: 10.5,
+    fontWeight: "700",
+    color: "#94a3b8",
+    letterSpacing: 0.6,
+  },
+  dockTabTextActive: {
+    color: "#050811",
+    fontWeight: "800",
+  },
+  listContentWithDock: {
+    paddingBottom: 90,
+  },
+  scrollPaddingWithDock: {
+    paddingBottom: 90,
+  },
+  accountCardCopied: {
+    borderColor: "#54f4fc",
+    backgroundColor: "rgba(84, 244, 252, 0.08)",
+  },
+  copyPill: {
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.25)",
+    paddingHorizontal: 8,
+    paddingVertical: 4,
+    borderRadius: 4,
+  },
+  copyPillActive: {
+    backgroundColor: "#54f4fc",
+    borderColor: "#54f4fc",
+  },
+  copyPillText: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#54f4fc",
+    letterSpacing: 0.6,
+  },
+  copyPillTextActive: {
+    color: "#050811",
+    fontWeight: "800",
+  },
+  cardProgressRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginTop: 8,
+    marginBottom: 6,
+  },
+  cardProgressTrack: {
+    flex: 1,
+    height: 3,
+    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    borderRadius: 1.5,
+    overflow: "hidden",
+  },
+  cardProgressBar: {
+    height: "100%",
+    backgroundColor: "#54f4fc",
+    borderRadius: 1.5,
+  },
+  cardSecondsText: {
+    fontSize: 9.5,
+    fontFamily: "monospace",
+    fontWeight: "700",
+    color: "#94a3b8",
+    width: 24,
+    textAlign: "right",
+  },
+  cardUtilityRow: {
+    flexDirection: "row",
+    justifyContent: "space-between",
+    alignItems: "center",
+    marginTop: 4,
+    paddingTop: 6,
+    borderTopWidth: 1,
+    borderTopColor: "rgba(255, 255, 255, 0.05)",
+  },
+  cardDeleteBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  cardDeleteBtnText: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#f43f5e",
+    letterSpacing: 0.5,
+  },
   lockGateContainer: {
     flex: 1,
     backgroundColor: "#050811",
