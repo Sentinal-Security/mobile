@@ -12,10 +12,12 @@ import {
   Modal,
   Platform,
   AppState,
-  InteractionManager,
-  PermissionsAndroid,
-  type Permission,
+  Dimensions,
+  Linking,
+  type NativeSyntheticEvent,
+  type NativeScrollEvent,
 } from "react-native";
+import * as WebBrowser from "expo-web-browser";
 import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
@@ -48,6 +50,8 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null
 
 
 
+const { width: SCREEN_WIDTH } = Dimensions.get("window");
+const PORTAL_URL = "https://web-beta-orcin-33.vercel.app/";
 const API_BASE_URL = "https://backend-pi68.onrender.com";
 
 interface PendingChallenge {
@@ -65,6 +69,7 @@ export default function AuthenticatorScreen() {
   const [isStartupComplete, setIsStartupComplete] = useState(false);
   const [isHardwareVault, setIsHardwareVault] = useState<boolean | null>(null);
   const [activeTab, setActiveTab] = useState<"CODES" | "PAIR" | "SECURITY">("CODES");
+  const pagerRef = useRef<ScrollView>(null);
 
   // Biometric Inherence Factor State
   const [hasBiometricHardware, setHasBiometricHardware] = useState(false);
@@ -400,8 +405,33 @@ export default function AuthenticatorScreen() {
     };
   }, [accounts, accountName, isLoaded, isStartupComplete, showScanner]);
 
-  // Authenticate with device biometrics or PIN to unlock TOTP codes
-  const handleUnlockVault = async () => {
+
+  const handleSelectTab = (tab: "CODES" | "PAIR" | "SECURITY") => {
+    setActiveTab(tab);
+    const index = tab === "CODES" ? 0 : tab === "PAIR" ? 1 : 2;
+    pagerRef.current?.scrollTo({ x: index * SCREEN_WIDTH, animated: true });
+  };
+
+  const handleScrollEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
+    const offsetX = e.nativeEvent.contentOffset.x;
+    const pageIndex = Math.round(offsetX / SCREEN_WIDTH);
+    if (pageIndex === 0 && activeTab !== "CODES") setActiveTab("CODES");
+    else if (pageIndex === 1 && activeTab !== "PAIR") setActiveTab("PAIR");
+    else if (pageIndex === 2 && activeTab !== "SECURITY") setActiveTab("SECURITY");
+  };
+
+  const openPortalUrl = async (url: string = PORTAL_URL) => {
+    try {
+      await WebBrowser.openBrowserAsync(url);
+    } catch {
+      Linking.openURL(url).catch(() => {
+        Alert.alert("Link Notice", `Please visit ${url} in your browser.`);
+      });
+    }
+  };
+
+  // Authenticate with Android system biometrics or device PIN / Pattern
+  const handleUnlockApp = async () => {
     if (authInFlightRef.current) return;
     authInFlightRef.current = true;
     try {
@@ -414,34 +444,29 @@ export default function AuthenticatorScreen() {
       }
 
       const result = await LocalAuthentication.authenticateAsync({
-        promptMessage: "Authenticate to View TOTP Passcodes",
+        promptMessage: "Unlock Sentinel Security Authenticator",
         cancelLabel: "Cancel",
-        fallbackLabel: "Use Device PIN",
+        fallbackLabel: "Use Device Screen Lock",
         disableDeviceFallback: false,
       });
 
       if (result.success) {
         setIsVaultUnlocked(true);
         recordMobileTelemetry({
-          actionType: "BIOMETRIC_VAULT_UNLOCK_SUCCESS",
-          details: "User verified biometric inherence to view TOTP codes",
+          actionType: "APP_LOCK_UNLOCK_SUCCESS",
+          details: "User authenticated to open Sentinel Authenticator",
         });
-      } else {
-        Alert.alert(
-          "Authentication Required",
-          "Biometric or device PIN verification is required to unlock security passcodes."
-        );
       }
     } catch (err) {
-      console.warn("Biometric verification notice:", err);
+      console.warn("Device authentication notice:", err);
       setIsVaultUnlocked(true);
     } finally {
       authInFlightRef.current = false;
     }
   };
 
-  // Re-lock vault
-  const handleLockVault = () => {
+  // Lock app
+  const handleLockApp = () => {
     setIsVaultUnlocked(false);
   };
 
@@ -689,31 +714,72 @@ export default function AuthenticatorScreen() {
 
   const progressPercent = Math.max(0, Math.min(100, (remainingSeconds / 30) * 100));
 
+  // Full-Screen Native Android Device Lock Gate
+  if (requireBiometrics && hasBiometricHardware && !isVaultUnlocked) {
+    return (
+      <SafeAreaView style={styles.lockGateContainer}>
+        <View style={styles.lockGateCenter}>
+          <Image
+            source={require("../../assets/images/icon.png")}
+            style={styles.lockGateLogo}
+            resizeMode="contain"
+          />
+          <View style={styles.lockBadge}>
+            <View style={styles.lockDot} />
+            <Text style={styles.lockBadgeText}>SECURE DEVICE LOCK</Text>
+          </View>
+          <Text style={styles.lockTitle}>Sentinel Authenticator</Text>
+          <Text style={styles.lockSubtitle}>
+            Authentication required to access enterprise TOTP passcodes and security verification tools.
+          </Text>
+
+          <TouchableOpacity style={styles.primaryUnlockButton} onPress={handleUnlockApp}>
+            <Text style={styles.primaryUnlockButtonText}>
+              UNLOCK WITH {biometricTypeLabel} / PIN
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={styles.portalHelperButton}
+            onPress={() => openPortalUrl(PORTAL_URL)}
+          >
+            <Text style={styles.portalHelperButtonText}>OPEN SENTINEL WEB PORTAL</Text>
+          </TouchableOpacity>
+        </View>
+      </SafeAreaView>
+    );
+  }
+
   return (
     <SafeAreaView style={styles.container}>
-      {/* Enterprise Header */}
+      {/* Centered Enterprise Top Header */}
       <View style={styles.headerContainer}>
-        <View style={styles.headerLeft}>
+        <View style={styles.headerRow}>
           <Image
             source={require("../../assets/images/icon.png")}
             style={styles.logoImage}
             resizeMode="contain"
           />
           <View style={styles.headerTextGroup}>
-            <View style={styles.badgeRow}>
+            <View style={styles.brandBadgeRow}>
               <View style={styles.statusDot} />
               <Text style={styles.brandBadge}>SENTINEL SECURITY</Text>
             </View>
             <Text style={styles.headerTitle}>Authenticator</Text>
-            <Text style={styles.headerSubtitle}>RFC 6238 Standard 6-Digit TOTP</Text>
           </View>
+
+          {requireBiometrics && hasBiometricHardware && (
+            <TouchableOpacity style={styles.quickLockIconBtn} onPress={handleLockApp}>
+              <Text style={styles.quickLockIconText}>LOCK</Text>
+            </TouchableOpacity>
+          )}
         </View>
 
-        {/* Global Navigation Bar */}
+        {/* Global Navigation Tabs (Swipe or Tap) */}
         <View style={styles.navBar}>
           <TouchableOpacity
             style={[styles.navTab, activeTab === "CODES" && styles.navTabActive]}
-            onPress={() => setActiveTab("CODES")}
+            onPress={() => handleSelectTab("CODES")}
           >
             <Text style={[styles.navTabText, activeTab === "CODES" && styles.navTabTextActive]}>
               CODES ({accounts.length})
@@ -722,315 +788,317 @@ export default function AuthenticatorScreen() {
 
           <TouchableOpacity
             style={[styles.navTab, activeTab === "PAIR" && styles.navTabActive]}
-            onPress={() => setActiveTab("PAIR")}
+            onPress={() => handleSelectTab("PAIR")}
           >
             <Text style={[styles.navTabText, activeTab === "PAIR" && styles.navTabTextActive]}>
-              + PAIR KEY
+              PAIR KEY
             </Text>
           </TouchableOpacity>
 
           <TouchableOpacity
             style={[styles.navTab, activeTab === "SECURITY" && styles.navTabActive]}
-            onPress={() => setActiveTab("SECURITY")}
+            onPress={() => handleSelectTab("SECURITY")}
           >
             <Text style={[styles.navTabText, activeTab === "SECURITY" && styles.navTabTextActive]}>
-              VAULT & STATUS
+              SYSTEM
             </Text>
           </TouchableOpacity>
         </View>
       </View>
 
-      {/* TAB 1: CODES (TOTP Passcodes & Countdown) */}
-      {activeTab === "CODES" && (
-        <View style={styles.tabContentFlex}>
-          {/* Synchronized 30-Second Refresh Progress Bar */}
-          <View style={styles.timerCard}>
-            <View style={styles.timerHeaderRow}>
-              <Text style={styles.timerLabel}>TOKEN REFRESH WINDOW</Text>
-              <Text style={styles.timerCountdown}>{remainingSeconds}s remaining</Text>
-            </View>
-            <View style={styles.progressTrack}>
-              <View style={[styles.progressBar, { width: `${progressPercent}%` }]} />
-            </View>
-          </View>
-
-          {/* Biometric Verification Unlock Banner */}
-          {requireBiometrics && hasBiometricHardware && (
-            <View style={isVaultUnlocked ? styles.vaultUnlockedCard : styles.vaultLockedCard}>
-              <View style={styles.vaultCardHeader}>
-                <View style={styles.vaultCardInfo}>
-                  <Text style={isVaultUnlocked ? styles.vaultUnlockedTitle : styles.vaultLockedTitle}>
-                    {isVaultUnlocked ? "HARDWARE VAULT UNLOCKED" : "HARDWARE VAULT LOCKED"}
-                  </Text>
-                  <Text style={styles.vaultCardSubtitle}>
-                    {isVaultUnlocked
-                      ? "Inherence factor validated. TOTP passcodes visible."
-                      : `${biometricTypeLabel} authentication required to reveal 6-digit codes.`}
-                  </Text>
+      {/* Horizontal Swipable Paged Container */}
+      <ScrollView
+        ref={pagerRef}
+        horizontal
+        pagingEnabled
+        showsHorizontalScrollIndicator={false}
+        onMomentumScrollEnd={handleScrollEnd}
+        style={styles.pagerContainer}
+      >
+        {/* PAGE 1: CODES */}
+        <View style={styles.pageItem}>
+          {accounts.length > 0 ? (
+            <View style={styles.pageContentFlex}>
+              {/* Token Countdown Bar (Shown only when enrolled accounts exist) */}
+              <View style={styles.timerCard}>
+                <View style={styles.timerHeaderRow}>
+                  <Text style={styles.timerLabel}>CODE REFRESH CYCLE</Text>
+                  <Text style={styles.timerCountdown}>{remainingSeconds}s remaining</Text>
                 </View>
-                {isVaultUnlocked ? (
-                  <TouchableOpacity style={styles.vaultLockButton} onPress={handleLockVault}>
-                    <Text style={styles.vaultLockButtonText}>LOCK VAULT</Text>
-                  </TouchableOpacity>
-                ) : (
-                  <TouchableOpacity style={styles.vaultUnlockButton} onPress={handleUnlockVault}>
-                    <Text style={styles.vaultUnlockButtonText}>UNLOCK VAULT</Text>
-                  </TouchableOpacity>
-                )}
+                <View style={styles.progressTrack}>
+                  <View style={[styles.progressBar, { width: `${progressPercent}%` }]} />
+                </View>
               </View>
-            </View>
-          )}
 
-          {/* Fully Scrollable Enrolled Accounts List */}
-          <FlatList
-            data={accounts}
-            keyExtractor={(item) => item.id}
-            contentContainerStyle={styles.listContent}
-            style={styles.accountsFlatList}
-            renderItem={({ item }) => {
-              let code = "------";
-              try {
-                code = generateTotp(item.secret);
-              } catch {
-                code = "------";
-              }
-              const formattedCode =
-                code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
+              <FlatList
+                data={accounts}
+                keyExtractor={(item) => item.id}
+                contentContainerStyle={styles.listContent}
+                renderItem={({ item }) => {
+                  let code = "------";
+                  try {
+                    code = generateTotp(item.secret);
+                  } catch {
+                    code = "------";
+                  }
+                  const formattedCode =
+                    code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
 
-              const isLocked = requireBiometrics && hasBiometricHardware && !isVaultUnlocked;
-
-              return (
-                <View style={styles.accountCard}>
-                  <View style={styles.accountTopRow}>
-                    <View style={styles.accountIdentityGroup}>
-                      <Text style={styles.accountName} numberOfLines={1}>
-                        {item.name}
-                      </Text>
-                      {item.issuer && (
-                        <View style={styles.issuerBadge}>
-                          <Text style={styles.issuerBadgeText}>{item.issuer.toUpperCase()}</Text>
+                  return (
+                    <View style={styles.accountCard}>
+                      <View style={styles.accountTopRow}>
+                        <View style={styles.accountIdentityGroup}>
+                          <Text style={styles.accountName} numberOfLines={1}>
+                            {item.name}
+                          </Text>
+                          {item.issuer && (
+                            <View style={styles.issuerBadge}>
+                              <Text style={styles.issuerBadgeText}>{item.issuer.toUpperCase()}</Text>
+                            </View>
+                          )}
                         </View>
-                      )}
-                    </View>
-                    <View style={styles.protocolBadge}>
-                      <Text style={styles.protocolBadgeText}>SHA-1 / 30S</Text>
-                    </View>
-                  </View>
+                        <View style={styles.protocolBadge}>
+                          <Text style={styles.protocolBadgeText}>SHA-1 / 30S</Text>
+                        </View>
+                      </View>
 
-                  <View style={styles.tokenRow}>
-                    {isLocked ? (
-                      <TouchableOpacity
-                        style={styles.tokenLockedPlaceholder}
-                        onPress={handleUnlockVault}
-                      >
-                        <Text style={styles.tokenLockedText}>AUTHENTICATION REQUIRED</Text>
-                        <Text style={styles.tokenLockedSubtext}>Tap to unlock with fingerprint / PIN</Text>
-                      </TouchableOpacity>
-                    ) : (
-                      <Text style={styles.totpToken}>{formattedCode}</Text>
-                    )}
+                      <View style={styles.tokenRow}>
+                        <Text style={styles.totpToken}>{formattedCode}</Text>
+                        <TouchableOpacity
+                          style={styles.removeButton}
+                          onPress={() => confirmDeleteAccount(item.id, item.name, item.issuer)}
+                        >
+                          <Text style={styles.removeButtonText}>REMOVE</Text>
+                        </TouchableOpacity>
+                      </View>
 
-                    <TouchableOpacity
-                      style={styles.removeButton}
-                      onPress={() => confirmDeleteAccount(item.id, item.name, item.issuer)}
+                      <Text style={styles.secretHintText} numberOfLines={1}>
+                        KEY: {item.secret.slice(0, 4)}••••••••{item.secret.slice(-4)}
+                      </Text>
+                    </View>
+                  );
+                }}
+              />
+            </View>
+          ) : (
+            <ScrollView style={styles.pageContentFlex} contentContainerStyle={styles.onboardingContainer}>
+              <View style={styles.welcomeCard}>
+                <View style={styles.welcomeIconShield} />
+                <Text style={styles.welcomeTitle}>WELCOME TO SENTINEL</Text>
+                <Text style={styles.welcomeDescription}>
+                  Your hardware-backed Multi-Factor Authenticator (MFA) device. Protect your enterprise identities with RFC 6238 time-based passcodes and real-time out-of-band push verifications.
+                </Text>
+
+                <View style={styles.welcomeActionsGroup}>
+                  <TouchableOpacity
+                    style={styles.welcomePrimaryBtn}
+                    onPress={() => handleSelectTab("PAIR")}
+                  >
+                    <Text style={styles.welcomePrimaryBtnText}>PAIR FIRST ACCOUNT KEY</Text>
+                  </TouchableOpacity>
+
+                  <TouchableOpacity
+                    style={styles.welcomePortalBtn}
+                    onPress={() => openPortalUrl(PORTAL_URL)}
+                  >
+                    <Text style={styles.welcomePortalBtnText}>OPEN SENTINEL WEB PORTAL</Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
+
+              <View style={styles.instructionCard}>
+                <Text style={styles.instructionHeading}>HOW TO GET STARTED</Text>
+                <Text style={styles.instructionStep}>
+                  1. Sign in to the Sentinel Web Portal on your computer.
+                </Text>
+                <Text style={styles.instructionStep}>
+                  2. Navigate to your Security & MFA settings and select "Pair Authenticator Device".
+                </Text>
+                <Text style={styles.instructionStep}>
+                  3. Swipe to "PAIR KEY" or click above to scan the displayed QR code.
+                </Text>
+              </View>
+            </ScrollView>
+          )}
+        </View>
+
+        {/* PAGE 2: PAIR KEY */}
+        <View style={styles.pageItem}>
+          <ScrollView style={styles.pageContentFlex} contentContainerStyle={styles.scrollPadding}>
+            <View style={styles.enrollmentCard}>
+              <View style={styles.enrollmentHeader}>
+                <Text style={styles.enrollmentTitle}>ENROLL 2FA KEY</Text>
+                <View style={styles.segmentContainer}>
+                  <TouchableOpacity
+                    style={[styles.segmentTab, enrollmentTab === "SCAN" && styles.segmentTabActive]}
+                    onPress={() => setEnrollmentTab("SCAN")}
+                  >
+                    <Text
+                      style={[
+                        styles.segmentTabText,
+                        enrollmentTab === "SCAN" && styles.segmentTabTextActive,
+                      ]}
                     >
-                      <Text style={styles.removeButtonText}>REMOVE</Text>
-                    </TouchableOpacity>
-                  </View>
+                      SCAN QR
+                    </Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={[styles.segmentTab, enrollmentTab === "MANUAL" && styles.segmentTabActive]}
+                    onPress={() => setEnrollmentTab("MANUAL")}
+                  >
+                    <Text
+                      style={[
+                        styles.segmentTabText,
+                        enrollmentTab === "MANUAL" && styles.segmentTabTextActive,
+                      ]}
+                    >
+                      MANUAL
+                    </Text>
+                  </TouchableOpacity>
+                </View>
+              </View>
 
-                  <Text style={styles.secretHintText} numberOfLines={1}>
-                    VAULT KEY: {item.secret.slice(0, 4)}••••••••{item.secret.slice(-4)}
+              {enrollmentTab === "SCAN" ? (
+                <View>
+                  <Text style={styles.modeDescriptionText}>
+                    Scan an enrollment QR code from the Sentinel Web Portal to automatically pair via the otpauth protocol.
+                  </Text>
+                  <TouchableOpacity style={styles.primaryScanButton} onPress={handleOpenScanner}>
+                    <Text style={styles.primaryScanButtonText}>LAUNCH CAMERA SCANNER</Text>
+                  </TouchableOpacity>
+                </View>
+              ) : (
+                <View>
+                  <Text style={styles.modeDescriptionText}>
+                    Enter account details and RFC 6238 Base32 secret key manually for camera-less provisioning.
+                  </Text>
+
+                  <TextInput
+                    style={styles.inputField}
+                    placeholder="Account Identity / Email (e.g. user@domain.com)"
+                    placeholderTextColor="#64748b"
+                    value={accountName}
+                    onChangeText={setAccountName}
+                    autoCapitalize="none"
+                    autoCorrect={false}
+                  />
+                  <TextInput
+                    style={styles.inputField}
+                    placeholder="Issuer / Organization (e.g. Sentinel Security, Google)"
+                    placeholderTextColor="#64748b"
+                    value={accountIssuer}
+                    onChangeText={setAccountIssuer}
+                    autoCapitalize="words"
+                    autoCorrect={false}
+                  />
+                  <TextInput
+                    style={[
+                      styles.inputField,
+                      manualValidationError ? styles.inputFieldError : null,
+                    ]}
+                    placeholder="Base32 Secret Key (e.g. JBSWY3DPEHPK3PXP)"
+                    placeholderTextColor="#64748b"
+                    value={secretKey}
+                    onChangeText={handleSecretKeyChange}
+                    autoCapitalize="characters"
+                    autoCorrect={false}
+                  />
+
+                  {manualValidationError && (
+                    <View style={styles.validationErrorBox}>
+                      <Text style={styles.validationErrorText}>{manualValidationError}</Text>
+                    </View>
+                  )}
+
+                  <TouchableOpacity
+                    style={styles.addKeyButton}
+                    onPress={() => {
+                      handleAddAccount();
+                      if (!manualValidationError && accountName.trim() && secretKey.trim()) {
+                        handleSelectTab("CODES");
+                      }
+                    }}
+                  >
+                    <Text style={styles.addKeyButtonText}>ENROLL ACCOUNT KEY</Text>
+                  </TouchableOpacity>
+                </View>
+              )}
+            </View>
+          </ScrollView>
+        </View>
+
+        {/* PAGE 3: SYSTEM & SECURITY */}
+        <View style={styles.pageItem}>
+          <ScrollView style={styles.pageContentFlex} contentContainerStyle={styles.scrollPadding}>
+            <View style={styles.securitySectionCard}>
+              <Text style={styles.securitySectionTitle}>SECURITY HARDWARE DIAGNOSTICS</Text>
+
+              <View style={styles.securityDetailRow}>
+                <Text style={styles.securityDetailLabel}>Hardware Keystore Enclave</Text>
+                <Text style={[styles.securityDetailValue, { color: isHardwareVault ? "#54f4fc" : "#94a3b8" }]}>
+                  {isHardwareVault ? "HARDWARE-BACKED (AES-256)" : "PERSISTENT STORAGE"}
+                </Text>
+              </View>
+
+              <View style={styles.securityDetailRow}>
+                <Text style={styles.securityDetailLabel}>Biometric Sensor</Text>
+                <Text style={[styles.securityDetailValue, { color: hasBiometricHardware ? "#10b981" : "#94a3b8" }]}>
+                  {hasBiometricHardware ? `${biometricTypeLabel} DETECTED` : "NOT AVAILABLE"}
+                </Text>
+              </View>
+
+              <View style={styles.securityDetailRow}>
+                <Text style={styles.securityDetailLabel}>Biometric Enrollment</Text>
+                <Text style={[styles.securityDetailValue, { color: biometricEnrolled ? "#10b981" : "#f59e0b" }]}>
+                  {biometricEnrolled ? "ENROLLED ON OS" : "NOT ENROLLED"}
+                </Text>
+              </View>
+
+              <View style={styles.securityDetailRow}>
+                <Text style={styles.securityDetailLabel}>Push Verification Channel</Text>
+                <Text style={[styles.securityDetailValue, { color: pushToken ? "#54f4fc" : "#94a3b8" }]}>
+                  {pushToken ? "FCM ACTIVE" : "LOCAL MODE"}
+                </Text>
+              </View>
+            </View>
+
+            <View style={styles.securitySectionCard}>
+              <Text style={styles.securitySectionTitle}>ACCESS PROTECTION POLICY</Text>
+              <Text style={styles.securitySectionSubtitle}>
+                Require biometric authentication or device PIN whenever opening the app.
+              </Text>
+
+              <TouchableOpacity style={styles.biometricSwitchButton} onPress={handleToggleBiometrics}>
+                <View style={styles.switchInfo}>
+                  <Text style={styles.switchTitle}>
+                    {requireBiometrics ? `Enforce ${biometricTypeLabel} App Lock` : "Direct App Access"}
+                  </Text>
+                  <Text style={styles.switchDesc}>
+                    {requireBiometrics
+                      ? "Full-screen device authentication gate is required on app launch."
+                      : "Application opens directly into passcodes view."}
                   </Text>
                 </View>
-              );
-            }}
-            ListEmptyComponent={
-              <View style={styles.emptyCard}>
-                <View style={styles.emptyBracket} />
-                <Text style={styles.emptyTitle}>NO SECURITY KEYS ENROLLED</Text>
-                <Text style={styles.emptyDescription}>
-                  Pair your mobile authenticator by scanning an enrollment QR code from the Sentinel Web Portal.
-                </Text>
-                <TouchableOpacity
-                  style={styles.emptyActionButton}
-                  onPress={() => setActiveTab("PAIR")}
-                >
-                  <Text style={styles.emptyActionButtonText}>+ PAIR FIRST KEY</Text>
-                </TouchableOpacity>
-              </View>
-            }
-          />
+                <View style={[styles.switchPill, requireBiometrics && styles.switchPillActive]}>
+                  <Text style={[styles.switchPillText, requireBiometrics && styles.switchPillTextActive]}>
+                    {requireBiometrics ? "ENABLED" : "OFF"}
+                  </Text>
+                </View>
+              </TouchableOpacity>
+            </View>
+
+            <View style={styles.securitySectionCard}>
+              <Text style={styles.securitySectionTitle}>ENTERPRISE RESOURCES</Text>
+              <TouchableOpacity
+                style={styles.resourceButton}
+                onPress={() => openPortalUrl(PORTAL_URL)}
+              >
+                <Text style={styles.resourceButtonText}>VISIT SENTINEL WEB PORTAL</Text>
+              </TouchableOpacity>
+            </View>
+          </ScrollView>
         </View>
-      )}
-
-      {/* TAB 2: PAIR (Scan QR Code or Manual Key Entry) */}
-      {activeTab === "PAIR" && (
-        <ScrollView style={styles.tabContentScroll} contentContainerStyle={styles.scrollPadding}>
-          <View style={styles.enrollmentCard}>
-            <View style={styles.enrollmentHeader}>
-              <Text style={styles.enrollmentTitle}>ENROLL 2FA KEY</Text>
-              <View style={styles.segmentContainer}>
-                <TouchableOpacity
-                  style={[styles.segmentTab, enrollmentTab === "SCAN" && styles.segmentTabActive]}
-                  onPress={() => setEnrollmentTab("SCAN")}
-                >
-                  <Text
-                    style={[
-                      styles.segmentTabText,
-                      enrollmentTab === "SCAN" && styles.segmentTabTextActive,
-                    ]}
-                  >
-                    SCAN QR
-                  </Text>
-                </TouchableOpacity>
-                <TouchableOpacity
-                  style={[styles.segmentTab, enrollmentTab === "MANUAL" && styles.segmentTabActive]}
-                  onPress={() => setEnrollmentTab("MANUAL")}
-                >
-                  <Text
-                    style={[
-                      styles.segmentTabText,
-                      enrollmentTab === "MANUAL" && styles.segmentTabTextActive,
-                    ]}
-                  >
-                    MANUAL
-                  </Text>
-                </TouchableOpacity>
-              </View>
-            </View>
-
-            {enrollmentTab === "SCAN" ? (
-              <View>
-                <Text style={styles.modeDescriptionText}>
-                  Scan an enrollment QR code from the Sentinel Web Portal to automatically pair via otpauth protocol.
-                </Text>
-                <TouchableOpacity style={styles.primaryScanButton} onPress={handleOpenScanner}>
-                  <Text style={styles.primaryScanButtonText}>LAUNCH QR SCANNER</Text>
-                </TouchableOpacity>
-              </View>
-            ) : (
-              <View>
-                <Text style={styles.modeDescriptionText}>
-                  Enter account details and RFC 6238 Base32 secret key manually for camera-less provisioning.
-                </Text>
-
-                <TextInput
-                  style={styles.inputField}
-                  placeholder="Account Identity / Email (e.g. user@domain.com)"
-                  placeholderTextColor="#64748b"
-                  value={accountName}
-                  onChangeText={setAccountName}
-                  autoCapitalize="none"
-                  autoCorrect={false}
-                />
-                <TextInput
-                  style={styles.inputField}
-                  placeholder="Issuer / Organization (e.g. Sentinel Security, Google)"
-                  placeholderTextColor="#64748b"
-                  value={accountIssuer}
-                  onChangeText={setAccountIssuer}
-                  autoCapitalize="words"
-                  autoCorrect={false}
-                />
-                <TextInput
-                  style={[
-                    styles.inputField,
-                    manualValidationError ? styles.inputFieldError : null,
-                  ]}
-                  placeholder="Base32 Secret Key (e.g. JBSWY3DPEHPK3PXP)"
-                  placeholderTextColor="#64748b"
-                  value={secretKey}
-                  onChangeText={handleSecretKeyChange}
-                  autoCapitalize="characters"
-                  autoCorrect={false}
-                />
-
-                {manualValidationError && (
-                  <View style={styles.validationErrorBox}>
-                    <Text style={styles.validationErrorText}>{manualValidationError}</Text>
-                  </View>
-                )}
-
-                <TouchableOpacity
-                  style={styles.addKeyButton}
-                  onPress={() => {
-                    handleAddAccount();
-                    if (!manualValidationError && accountName.trim() && secretKey.trim()) {
-                      setActiveTab("CODES");
-                    }
-                  }}
-                >
-                  <Text style={styles.addKeyButtonText}>ENROLL ACCOUNT KEY</Text>
-                </TouchableOpacity>
-              </View>
-            )}
-          </View>
-        </ScrollView>
-      )}
-
-      {/* TAB 3: SECURITY & VAULT (Hardware Keystore & Biometric Settings) */}
-      {activeTab === "SECURITY" && (
-        <ScrollView style={styles.tabContentScroll} contentContainerStyle={styles.scrollPadding}>
-          {/* Security Status Card */}
-          <View style={styles.securitySectionCard}>
-            <Text style={styles.securitySectionTitle}>SECURITY HARDWARE STATUS</Text>
-            
-            <View style={styles.securityDetailRow}>
-              <Text style={styles.securityDetailLabel}>Hardware Keystore Enclave</Text>
-              <Text style={[styles.securityDetailValue, { color: isHardwareVault ? "#54f4fc" : "#94a3b8" }]}>
-                {isHardwareVault ? "HARDWARE-BACKED (AES-256)" : "PERSISTENT STORAGE"}
-              </Text>
-            </View>
-
-            <View style={styles.securityDetailRow}>
-              <Text style={styles.securityDetailLabel}>Biometric Sensor</Text>
-              <Text style={[styles.securityDetailValue, { color: hasBiometricHardware ? "#10b981" : "#94a3b8" }]}>
-                {hasBiometricHardware ? `${biometricTypeLabel} DETECTED` : "NOT AVAILABLE"}
-              </Text>
-            </View>
-
-            <View style={styles.securityDetailRow}>
-              <Text style={styles.securityDetailLabel}>Biometric Enrollment</Text>
-              <Text style={[styles.securityDetailValue, { color: biometricEnrolled ? "#10b981" : "#f59e0b" }]}>
-                {biometricEnrolled ? "ENROLLED ON OS" : "NOT ENROLLED"}
-              </Text>
-            </View>
-
-            <View style={styles.securityDetailRow}>
-              <Text style={styles.securityDetailLabel}>Push Notification Channel</Text>
-              <Text style={[styles.securityDetailValue, { color: pushToken ? "#54f4fc" : "#94a3b8" }]}>
-                {pushToken ? "FCM ACTIVE" : "LOCAL MODE"}
-              </Text>
-            </View>
-          </View>
-
-          {/* Biometric Policy Card */}
-          <View style={styles.securitySectionCard}>
-            <Text style={styles.securitySectionTitle}>AUTHENTICATION ACCESS POLICY</Text>
-            <Text style={styles.securitySectionSubtitle}>
-              Require biometric verification or device PIN before revealing 6-digit rolling codes.
-            </Text>
-
-            <TouchableOpacity style={styles.biometricSwitchButton} onPress={handleToggleBiometrics}>
-              <View style={styles.switchInfo}>
-                <Text style={styles.switchTitle}>
-                  {requireBiometrics ? `Enforce ${biometricTypeLabel} Lock` : "Direct Passcode Access"}
-                </Text>
-                <Text style={styles.switchDesc}>
-                  {requireBiometrics
-                    ? "Passcodes are obscured until inherence factor is validated."
-                    : "Passcodes are immediately visible upon application launch."}
-                </Text>
-              </View>
-              <View style={[styles.switchPill, requireBiometrics && styles.switchPillActive]}>
-                <Text style={[styles.switchPillText, requireBiometrics && styles.switchPillTextActive]}>
-                  {requireBiometrics ? "ENFORCED" : "OFF"}
-                </Text>
-              </View>
-            </TouchableOpacity>
-          </View>
-        </ScrollView>
-      )}
+      </ScrollView>
 
       {/* Full-Screen QR Code Scanner Modal (Mounted only when active) */}
       {showScanner && (
@@ -1168,6 +1236,233 @@ export default function AuthenticatorScreen() {
 }
 
 const styles = StyleSheet.create({
+  lockGateContainer: {
+    flex: 1,
+    backgroundColor: "#050811",
+    justifyContent: "center",
+    alignItems: "center",
+    paddingHorizontal: 24,
+  },
+  lockGateCenter: {
+    alignItems: "center",
+    maxWidth: 380,
+    width: "100%",
+  },
+  lockGateLogo: {
+    width: 68,
+    height: 68,
+    borderRadius: 14,
+    borderWidth: 1.5,
+    borderColor: "rgba(84, 244, 252, 0.4)",
+    marginBottom: 16,
+  },
+  lockBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.25)",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 4,
+    marginBottom: 12,
+  },
+  lockDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#54f4fc",
+  },
+  lockBadgeText: {
+    fontSize: 9.5,
+    fontWeight: "800",
+    color: "#54f4fc",
+    letterSpacing: 1.2,
+  },
+  lockTitle: {
+    fontSize: 22,
+    fontWeight: "800",
+    color: "#ffffff",
+    letterSpacing: -0.4,
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  lockSubtitle: {
+    fontSize: 12.5,
+    color: "#94a3b8",
+    textAlign: "center",
+    lineHeight: 18,
+    marginBottom: 24,
+  },
+  primaryUnlockButton: {
+    backgroundColor: "#54f4fc",
+    width: "100%",
+    paddingVertical: 14,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+    marginBottom: 12,
+  },
+  primaryUnlockButtonText: {
+    color: "#050811",
+    fontSize: 12,
+    fontWeight: "800",
+    letterSpacing: 1,
+  },
+  portalHelperButton: {
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.3)",
+    width: "100%",
+    paddingVertical: 12,
+    borderRadius: 8,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  portalHelperButtonText: {
+    color: "#cbd5e1",
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+  },
+  headerRow: {
+    flexDirection: "row",
+    alignItems: "center",
+  },
+  brandBadgeRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 6,
+    marginBottom: 2,
+  },
+  quickLockIconBtn: {
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    borderWidth: 1,
+    borderColor: "rgba(244, 63, 94, 0.4)",
+    paddingHorizontal: 10,
+    paddingVertical: 6,
+    borderRadius: 6,
+  },
+  quickLockIconText: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#fb7185",
+    letterSpacing: 0.8,
+  },
+  pagerContainer: {
+    flex: 1,
+  },
+  pageItem: {
+    width: SCREEN_WIDTH - 32,
+    flex: 1,
+  },
+  pageContentFlex: {
+    flex: 1,
+  },
+  onboardingContainer: {
+    paddingVertical: 16,
+    alignItems: "center",
+  },
+  welcomeCard: {
+    backgroundColor: "rgba(15, 23, 42, 0.85)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.25)",
+    borderRadius: 10,
+    padding: 20,
+    alignItems: "center",
+    width: "100%",
+    marginBottom: 16,
+  },
+  welcomeIconShield: {
+    width: 32,
+    height: 4,
+    backgroundColor: "#54f4fc",
+    borderRadius: 2,
+    marginBottom: 14,
+  },
+  welcomeTitle: {
+    fontSize: 14,
+    fontWeight: "800",
+    letterSpacing: 1.5,
+    color: "#ffffff",
+    marginBottom: 8,
+    textAlign: "center",
+  },
+  welcomeDescription: {
+    fontSize: 12,
+    color: "#94a3b8",
+    textAlign: "center",
+    lineHeight: 18,
+    marginBottom: 20,
+  },
+  welcomeActionsGroup: {
+    width: "100%",
+    gap: 10,
+  },
+  welcomePrimaryBtn: {
+    backgroundColor: "#54f4fc",
+    paddingVertical: 12,
+    borderRadius: 6,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  welcomePrimaryBtnText: {
+    color: "#050811",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
+  welcomePortalBtn: {
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.3)",
+    paddingVertical: 11,
+    borderRadius: 6,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  welcomePortalBtnText: {
+    color: "#cbd5e1",
+    fontSize: 11,
+    fontWeight: "700",
+    letterSpacing: 0.6,
+  },
+  instructionCard: {
+    backgroundColor: "rgba(7, 12, 22, 0.7)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.08)",
+    borderRadius: 8,
+    padding: 16,
+    width: "100%",
+  },
+  instructionHeading: {
+    fontSize: 10.5,
+    fontWeight: "800",
+    color: "#54f4fc",
+    letterSpacing: 1,
+    marginBottom: 10,
+  },
+  instructionStep: {
+    fontSize: 11.5,
+    color: "#94a3b8",
+    lineHeight: 18,
+    marginBottom: 6,
+  },
+  resourceButton: {
+    backgroundColor: "rgba(5, 8, 17, 0.8)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.25)",
+    paddingVertical: 12,
+    borderRadius: 6,
+    alignItems: "center",
+    justifyContent: "center",
+    marginTop: 6,
+  },
+  resourceButtonText: {
+    color: "#54f4fc",
+    fontSize: 11,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
   navBar: {
     flexDirection: "row",
     backgroundColor: "rgba(15, 23, 42, 0.95)",
