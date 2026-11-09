@@ -95,6 +95,8 @@ export default function AuthenticatorScreen() {
   const [accountIssuer, setAccountIssuer] = useState("");
   const [secretKey, setSecretKey] = useState("");
   const [manualValidationError, setManualValidationError] = useState<string | null>(null);
+  const [isResolvingSecret, setIsResolvingSecret] = useState(false);
+  const [resolvedIdentity, setResolvedIdentity] = useState<string | null>(null);
 
   // TOTP Clock and Scanner
   const [remainingSeconds, setRemainingSeconds] = useState(getSecondsRemaining());
@@ -702,37 +704,126 @@ export default function AuthenticatorScreen() {
     }
   };
 
-  // Secret key input validator
+  const resolveSecretIdentity = async (candidateSecret: string) => {
+    if (candidateSecret.length < 8) return;
+    setIsResolvingSecret(true);
+    try {
+      const res = await fetch(`${API_BASE_URL}/api/mfa/resolve-secret?secret=${encodeURIComponent(candidateSecret)}`);
+      const json = await res.json();
+      if (json.success && json.data) {
+        if (json.data.email) {
+          setAccountName(json.data.email);
+        }
+        if (json.data.issuer) {
+          setAccountIssuer(json.data.issuer);
+        }
+        setResolvedIdentity(`${json.data.email} (${json.data.issuer || "Sentinel IAM"})`);
+      } else {
+        setResolvedIdentity(null);
+      }
+    } catch {
+      setResolvedIdentity(null);
+    } finally {
+      setIsResolvingSecret(false);
+    }
+  };
+
+  // Secret key input validator & URI parser
   const handleSecretKeyChange = (text: string) => {
-    const clean = text.toUpperCase().replace(/\s+/g, "");
+    // Detect otpauth:// URI pasted in the secret key field
+    if (text.trim().startsWith("otpauth://")) {
+      const rawUri = text.trim();
+      let extractedSecret = "";
+      let extractedName = "";
+      let extractedIssuer = "";
+
+      const secretMatch = rawUri.match(/[?&]secret=([A-Za-z2-7]+)/i);
+      if (secretMatch && secretMatch[1]) {
+        extractedSecret = secretMatch[1].toUpperCase().replace(/0/g, "O").replace(/1/g, "I");
+      }
+
+      const issuerMatch = rawUri.match(/[?&]issuer=([^&]+)/i);
+      if (issuerMatch) {
+        extractedIssuer = decodeURIComponent(issuerMatch[1]);
+      }
+
+      const labelMatch = rawUri.match(/otpauth:\/\/totp\/([^?]+)/i);
+      if (labelMatch && labelMatch[1]) {
+        const rawLabel = decodeURIComponent(labelMatch[1]);
+        if (rawLabel.includes(":")) {
+          const parts = rawLabel.split(":");
+          if (!extractedIssuer) extractedIssuer = parts[0];
+          extractedName = parts[1] || parts[0];
+        } else {
+          extractedName = rawLabel;
+        }
+      }
+
+      if (extractedSecret) {
+        setSecretKey(extractedSecret);
+        if (extractedName) setAccountName(extractedName);
+        if (extractedIssuer) setAccountIssuer(extractedIssuer);
+        setManualValidationError(null);
+        setResolvedIdentity(`${extractedName || "Enrolled Account"}${extractedIssuer ? ` (${extractedIssuer})` : ""}`);
+        return;
+      }
+    }
+
+    let clean = text.toUpperCase().replace(/\s+/g, "");
+    clean = clean.replace(/0/g, "O").replace(/1/g, "I");
     setSecretKey(clean);
 
     if (clean.length > 0) {
       if (!/^[A-Z2-7]+=*$/.test(clean)) {
         setManualValidationError("Base32 keys must only contain letters A-Z and digits 2-7.");
+        setResolvedIdentity(null);
       } else if (clean.length < 8) {
         setManualValidationError("Base32 keys must be at least 8 characters long.");
+        setResolvedIdentity(null);
       } else {
         setManualValidationError(null);
+        resolveSecretIdentity(clean);
       }
     } else {
       setManualValidationError(null);
+      setResolvedIdentity(null);
     }
   };
 
-  const handleAddAccount = (name?: string, secret?: string, issuer?: string) => {
-    const cleanName = (name || accountName).trim();
-    const cleanSecret = (secret || secretKey).trim().toUpperCase().replace(/\s+/g, "");
-    const cleanIssuer = (issuer || accountIssuer).trim();
+  const handleAddAccount = async (name?: string, secret?: string, issuer?: string) => {
+    let cleanSecret = (secret || secretKey).trim().toUpperCase().replace(/\s+/g, "").replace(/0/g, "O").replace(/1/g, "I");
+    let cleanName = (name || accountName).trim();
+    let cleanIssuer = (issuer || accountIssuer).trim();
 
-    if (!cleanName || !cleanSecret) {
-      Alert.alert("Input Error", "Both Account Name and Secret Key are required.");
+    if (!cleanSecret) {
+      Alert.alert("Input Error", "Secret Key is required.");
       return;
     }
 
     if (!/^[A-Z2-7]+=*$/.test(cleanSecret) || cleanSecret.length < 8) {
       Alert.alert("Invalid Key", "Secret Key must be a valid Base32 string (A-Z, 2-7, min 8 characters).");
       return;
+    }
+
+    // Auto-resolve identity from security gateway if name is not set
+    if (!cleanName) {
+      try {
+        const res = await fetch(`${API_BASE_URL}/api/mfa/resolve-secret?secret=${encodeURIComponent(cleanSecret)}`);
+        const json = await res.json();
+        if (json.success && json.data) {
+          if (json.data.email) cleanName = json.data.email;
+          if (json.data.issuer && !cleanIssuer) cleanIssuer = json.data.issuer;
+        }
+      } catch (err) {
+        console.warn("Auto-resolve failed, continuing with fallback:", err);
+      }
+    }
+
+    if (!cleanName) {
+      cleanName = `Sentinel Account (${cleanSecret.slice(-4)})`;
+    }
+    if (!cleanIssuer) {
+      cleanIssuer = "Sentinel IAM";
     }
 
     const newAccount: TotpAccount = {
@@ -753,8 +844,10 @@ export default function AuthenticatorScreen() {
     setAccountName("");
     setAccountIssuer("");
     setSecretKey("");
+    setResolvedIdentity(null);
     setManualValidationError(null);
     setShowScanner(false);
+    handleSelectTab("CODES");
 
     recordMobileTelemetry({
       actionType: "ENROLL_KEY_MANUAL",
@@ -768,6 +861,8 @@ export default function AuthenticatorScreen() {
       details: `Enrolled TOTP secret (${cleanIssuer || "Sentinel IAM"})`,
       account: cleanName,
     }).then((log) => setAuditLogs((prev) => [log, ...prev]));
+
+    Alert.alert("Account Paired", `Successfully enrolled 2FA for ${cleanName}`);
   };
 
   const confirmDeleteAccount = (id: string, name: string, issuer?: string) => {
@@ -1053,12 +1148,43 @@ export default function AuthenticatorScreen() {
         ) : (
           <View>
             <Text style={styles.modeDescriptionText}>
-              Enter account identity and Base32 secret key manually for camera-less provisioning.
+              Paste your Base32 pairing key from Sentinel IAM. Account identity and company are resolved automatically.
             </Text>
 
             <TextInput
+              style={[
+                styles.inputField,
+                manualValidationError ? styles.inputFieldError : null,
+              ]}
+              placeholder="Base32 Secret Key (e.g. IUMWBTWCDVSRBL...)"
+              placeholderTextColor="#64748b"
+              value={secretKey}
+              onChangeText={handleSecretKeyChange}
+              autoCapitalize="characters"
+              autoCorrect={false}
+            />
+
+            {isResolvingSecret && (
+              <View style={styles.resolvingBox}>
+                <Text style={styles.resolvingText}>Resolving identity from security gateway...</Text>
+              </View>
+            )}
+
+            {resolvedIdentity && (
+              <View style={styles.resolvedIdentityBox}>
+                <Text style={styles.resolvedIdentityText}>Account Identified: {resolvedIdentity}</Text>
+              </View>
+            )}
+
+            {manualValidationError && (
+              <View style={styles.validationErrorBox}>
+                <Text style={styles.validationErrorText}>{manualValidationError}</Text>
+              </View>
+            )}
+
+            <TextInput
               style={styles.inputField}
-              placeholder="Account Email (e.g. user@domain.com)"
+              placeholder="Account Email (Auto-detected)"
               placeholderTextColor="#64748b"
               value={accountName}
               onChangeText={setAccountName}
@@ -1067,40 +1193,17 @@ export default function AuthenticatorScreen() {
             />
             <TextInput
               style={styles.inputField}
-              placeholder="Issuer Organization (e.g. Sentinel IAM)"
+              placeholder="Issuer Organization (Auto-detected)"
               placeholderTextColor="#64748b"
               value={accountIssuer}
               onChangeText={setAccountIssuer}
               autoCapitalize="words"
               autoCorrect={false}
             />
-            <TextInput
-              style={[
-                styles.inputField,
-                manualValidationError ? styles.inputFieldError : null,
-              ]}
-              placeholder="Base32 Secret Key (e.g. JBSWY3DPEHPK3PXP)"
-              placeholderTextColor="#64748b"
-              value={secretKey}
-              onChangeText={handleSecretKeyChange}
-              autoCapitalize="characters"
-              autoCorrect={false}
-            />
-
-            {manualValidationError && (
-              <View style={styles.validationErrorBox}>
-                <Text style={styles.validationErrorText}>{manualValidationError}</Text>
-              </View>
-            )}
 
             <TouchableOpacity
               style={styles.addKeyButton}
-              onPress={() => {
-                handleAddAccount();
-                if (!manualValidationError && accountName.trim() && secretKey.trim()) {
-                  handleSelectTab("CODES");
-                }
-              }}
+              onPress={() => handleAddAccount()}
             >
               <Text style={styles.addKeyButtonText}>ENROLL ACCOUNT KEY</Text>
             </TouchableOpacity>
@@ -2474,6 +2577,33 @@ const styles = StyleSheet.create({
   validationErrorText: {
     fontSize: 10,
     color: "#f87171",
+  },
+  resolvingBox: {
+    backgroundColor: "rgba(84, 244, 252, 0.08)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.25)",
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 4,
+    marginBottom: 8,
+  },
+  resolvingText: {
+    fontSize: 10,
+    color: "#54f4fc",
+  },
+  resolvedIdentityBox: {
+    backgroundColor: "rgba(16, 185, 129, 0.1)",
+    borderWidth: 1,
+    borderColor: "rgba(16, 185, 129, 0.3)",
+    paddingHorizontal: 8,
+    paddingVertical: 6,
+    borderRadius: 4,
+    marginBottom: 8,
+  },
+  resolvedIdentityText: {
+    fontSize: 10,
+    color: "#34d399",
+    fontWeight: "600",
   },
   addKeyButton: {
     backgroundColor: "transparent",
