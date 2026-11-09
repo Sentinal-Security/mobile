@@ -12,8 +12,8 @@ import {
   Modal,
   Platform,
   AppState,
-  Dimensions,
   Linking,
+  useWindowDimensions,
   type NativeSyntheticEvent,
   type NativeScrollEvent,
 } from "react-native";
@@ -51,7 +51,6 @@ async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null
 
 
 
-const { width: SCREEN_WIDTH } = Dimensions.get("window");
 const PORTAL_URL = "https://web-beta-orcin-33.vercel.app/";
 const API_BASE_URL = "https://backend-pi68.onrender.com";
 
@@ -65,6 +64,10 @@ interface PendingChallenge {
 }
 
 export default function AuthenticatorScreen() {
+  const { width: windowWidth } = useWindowDimensions();
+  const effectiveContainerWidth = Math.min(windowWidth, 480);
+  const pageWidth = effectiveContainerWidth - 32;
+
   const [accounts, setAccounts] = useState<TotpAccount[]>([]);
   const [isLoaded, setIsLoaded] = useState(false);
   const [isStartupComplete, setIsStartupComplete] = useState(false);
@@ -424,16 +427,22 @@ export default function AuthenticatorScreen() {
   const handleSelectTab = (tab: "CODES" | "PAIR" | "SECURITY") => {
     setActiveTab(tab);
     const index = tab === "CODES" ? 0 : tab === "PAIR" ? 1 : 2;
-    pagerRef.current?.scrollTo({ x: index * SCREEN_WIDTH, animated: true });
+    pagerRef.current?.scrollTo({ x: index * pageWidth, animated: true });
   };
 
   const handleScrollEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
     const offsetX = e.nativeEvent.contentOffset.x;
-    const pageIndex = Math.round(offsetX / SCREEN_WIDTH);
+    const pageIndex = Math.round(offsetX / pageWidth);
     if (pageIndex === 0 && activeTab !== "CODES") setActiveTab("CODES");
     else if (pageIndex === 1 && activeTab !== "PAIR") setActiveTab("PAIR");
     else if (pageIndex === 2 && activeTab !== "SECURITY") setActiveTab("SECURITY");
   };
+
+  // Re-align horizontal pager when viewport resizes dynamically
+  useEffect(() => {
+    const index = activeTab === "CODES" ? 0 : activeTab === "PAIR" ? 1 : 2;
+    pagerRef.current?.scrollTo({ x: index * pageWidth, animated: false });
+  }, [pageWidth]);
 
   const openPortalUrl = async (url: string = PORTAL_URL) => {
     try {
@@ -732,41 +741,44 @@ export default function AuthenticatorScreen() {
   // Full-Screen Native Android Device Lock Gate
   if (requireBiometrics && hasBiometricHardware && !isVaultUnlocked) {
     return (
-      <SafeAreaView style={styles.lockGateContainer}>
-        <View style={styles.lockGateCenter}>
-          <Image
-            source={require("../../assets/images/icon.png")}
-            style={styles.lockGateLogo}
-            resizeMode="contain"
-          />
-          <View style={styles.lockBadge}>
-            <View style={styles.lockDot} />
-            <Text style={styles.lockBadgeText}>SECURE DEVICE LOCK</Text>
-          </View>
-          <Text style={styles.lockTitle}>Sentinel Authenticator</Text>
-          <Text style={styles.lockSubtitle}>
-            Biometric verification or device screen lock required to access enterprise TOTP passcodes and verification tools.
-          </Text>
-
-          <TouchableOpacity style={styles.primaryUnlockButton} onPress={handleUnlockApp}>
-            <Text style={styles.primaryUnlockButtonText}>
-              UNLOCK WITH {biometricTypeLabel} / PIN
+      <View style={styles.outerRoot}>
+        <SafeAreaView style={styles.lockGateContainer}>
+          <View style={styles.lockGateCenter}>
+            <Image
+              source={require("../../assets/images/icon.png")}
+              style={styles.lockGateLogo}
+              resizeMode="contain"
+            />
+            <View style={styles.lockBadge}>
+              <View style={styles.lockDot} />
+              <Text style={styles.lockBadgeText}>SECURE DEVICE LOCK</Text>
+            </View>
+            <Text style={styles.lockTitle}>Sentinel Authenticator</Text>
+            <Text style={styles.lockSubtitle}>
+              Biometric verification or device screen lock required to access enterprise TOTP passcodes and verification tools.
             </Text>
-          </TouchableOpacity>
 
-          <TouchableOpacity
-            style={styles.portalHelperButton}
-            onPress={() => openPortalUrl(PORTAL_URL)}
-          >
-            <Text style={styles.portalHelperButtonText}>OPEN SENTINEL WEB PORTAL</Text>
-          </TouchableOpacity>
-        </View>
-      </SafeAreaView>
+            <TouchableOpacity style={styles.primaryUnlockButton} onPress={handleUnlockApp}>
+              <Text style={styles.primaryUnlockButtonText}>
+                UNLOCK WITH {biometricTypeLabel} / PIN
+              </Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.portalHelperButton}
+              onPress={() => openPortalUrl(PORTAL_URL)}
+            >
+              <Text style={styles.portalHelperButtonText}>OPEN SENTINEL WEB PORTAL</Text>
+            </TouchableOpacity>
+          </View>
+        </SafeAreaView>
+      </View>
     );
   }
 
   return (
-    <SafeAreaView style={styles.container}>
+    <View style={styles.outerRoot}>
+      <SafeAreaView style={styles.container}>
       {/* Top Header Bar */}
       <View style={styles.headerContainer}>
         <View style={styles.headerRow}>
@@ -801,7 +813,7 @@ export default function AuthenticatorScreen() {
         style={styles.pagerContainer}
       >
         {/* TAB 1: PASSCODES */}
-        <View style={styles.pageItem}>
+        <View style={[styles.pageItem, { width: pageWidth }]}>
           {accounts.length > 0 ? (
             <FlatList
               data={accounts}
@@ -923,7 +935,7 @@ export default function AuthenticatorScreen() {
         </View>
 
         {/* TAB 2: PAIR KEY */}
-        <View style={styles.pageItem}>
+        <View style={[styles.pageItem, { width: pageWidth }]}>
           <ScrollView
             style={styles.pageContentFlex}
             contentContainerStyle={styles.scrollPaddingWithDock}
@@ -1032,7 +1044,7 @@ export default function AuthenticatorScreen() {
         </View>
 
         {/* TAB 3: SYSTEM */}
-        <View style={styles.pageItem}>
+        <View style={[styles.pageItem, { width: pageWidth }]}>
           <ScrollView
             style={styles.pageContentFlex}
             contentContainerStyle={styles.scrollPaddingWithDock}
@@ -1272,10 +1284,17 @@ export default function AuthenticatorScreen() {
         </Modal>
       )}
     </SafeAreaView>
+  </View>
   );
 }
 
 const styles = StyleSheet.create({
+  outerRoot: {
+    flex: 1,
+    backgroundColor: "#03060c",
+    alignItems: "center",
+    width: "100%",
+  },
   bottomDockContainer: {
     position: "absolute",
     bottom: 16,
@@ -1398,6 +1417,8 @@ const styles = StyleSheet.create({
   },
   lockGateContainer: {
     flex: 1,
+    width: "100%",
+    maxWidth: 480,
     backgroundColor: "#050811",
     justifyContent: "center",
     alignItems: "center",
@@ -1513,7 +1534,6 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   pageItem: {
-    width: SCREEN_WIDTH - 32,
     flex: 1,
   },
   pageContentFlex: {
@@ -1767,9 +1787,13 @@ const styles = StyleSheet.create({
   },
   container: {
     flex: 1,
+    width: "100%",
+    maxWidth: 480,
     paddingHorizontal: 16,
     paddingTop: 12,
     backgroundColor: "#050811",
+    position: "relative",
+    overflow: "hidden",
   },
   headerContainer: {
     marginBottom: 12,
