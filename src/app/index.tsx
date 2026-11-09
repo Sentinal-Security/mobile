@@ -426,8 +426,10 @@ export default function AuthenticatorScreen() {
 
   const handleSelectTab = (tab: "CODES" | "PAIR" | "SECURITY") => {
     setActiveTab(tab);
-    const index = tab === "CODES" ? 0 : tab === "PAIR" ? 1 : 2;
-    pagerRef.current?.scrollTo({ x: index * pageWidth, animated: true });
+    if (Platform.OS !== "web") {
+      const index = tab === "CODES" ? 0 : tab === "PAIR" ? 1 : 2;
+      pagerRef.current?.scrollTo({ x: index * pageWidth, animated: true });
+    }
   };
 
   const handleScrollEnd = (e: NativeSyntheticEvent<NativeScrollEvent>) => {
@@ -438,10 +440,12 @@ export default function AuthenticatorScreen() {
     else if (pageIndex === 2 && activeTab !== "SECURITY") setActiveTab("SECURITY");
   };
 
-  // Re-align horizontal pager when viewport resizes dynamically
+  // Re-align horizontal pager when viewport resizes dynamically (native mobile)
   useEffect(() => {
-    const index = activeTab === "CODES" ? 0 : activeTab === "PAIR" ? 1 : 2;
-    pagerRef.current?.scrollTo({ x: index * pageWidth, animated: false });
+    if (Platform.OS !== "web") {
+      const index = activeTab === "CODES" ? 0 : activeTab === "PAIR" ? 1 : 2;
+      pagerRef.current?.scrollTo({ x: index * pageWidth, animated: false });
+    }
   }, [pageWidth]);
 
   const openPortalUrl = async (url: string = PORTAL_URL) => {
@@ -738,6 +742,310 @@ export default function AuthenticatorScreen() {
 
   const progressPercent = Math.max(0, Math.min(100, (remainingSeconds / 30) * 100));
 
+  const renderPasscodesTab = () => (
+    accounts.length > 0 ? (
+      <FlatList
+        data={accounts}
+        keyExtractor={(item) => item.id}
+        contentContainerStyle={styles.listContentWithDock}
+        showsVerticalScrollIndicator={false}
+        renderItem={({ item }) => {
+          let code = "------";
+          try {
+            code = generateTotp(item.secret);
+          } catch {
+            code = "------";
+          }
+          const formattedCode =
+            code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
+          const isCopied = copiedCodeId === item.id;
+
+          return (
+            <TouchableOpacity
+              activeOpacity={0.88}
+              style={[styles.accountCard, isCopied && styles.accountCardCopied]}
+              onPress={() => handleCopyCode(item.id, code)}
+            >
+              {/* Header: Issuer + Algorithm badge */}
+              <View style={styles.accountTopRow}>
+                <View style={styles.accountIdentityGroup}>
+                  <Text style={styles.accountName} numberOfLines={1}>
+                    {item.name}
+                  </Text>
+                  {item.issuer && (
+                    <View style={styles.issuerBadge}>
+                      <Text style={styles.issuerBadgeText}>{item.issuer.toUpperCase()}</Text>
+                    </View>
+                  )}
+                </View>
+                <View style={styles.protocolBadge}>
+                  <Text style={styles.protocolBadgeText}>SHA-1 / 30S</Text>
+                </View>
+              </View>
+
+              {/* Middle: Large Monospace Passcode & Quick Action */}
+              <View style={styles.tokenRow}>
+                <Text style={styles.totpToken}>{formattedCode}</Text>
+                <View style={[styles.copyPill, isCopied && styles.copyPillActive]}>
+                  <Text style={[styles.copyPillText, isCopied && styles.copyPillTextActive]}>
+                    {isCopied ? "COPIED" : "TAP TO COPY"}
+                  </Text>
+                </View>
+              </View>
+
+              {/* Footer: Per-Card Synchronized Progress Line & Remaining Seconds */}
+              <View style={styles.cardProgressRow}>
+                <View style={styles.cardProgressTrack}>
+                  <View style={[styles.cardProgressBar, { width: `${progressPercent}%` }]} />
+                </View>
+                <Text style={styles.cardSecondsText}>{remainingSeconds}s</Text>
+              </View>
+
+              {/* Bottom Utility Row */}
+              <View style={styles.cardUtilityRow}>
+                <Text style={styles.secretHintText} numberOfLines={1}>
+                  KEY: {item.secret.slice(0, 4)}••••••••{item.secret.slice(-4)}
+                </Text>
+                <TouchableOpacity
+                  style={styles.cardDeleteBtn}
+                  onPress={() => confirmDeleteAccount(item.id, item.name, item.issuer)}
+                >
+                  <Text style={styles.cardDeleteBtnText}>REMOVE</Text>
+                </TouchableOpacity>
+              </View>
+            </TouchableOpacity>
+          );
+        }}
+      />
+    ) : (
+      <ScrollView
+        style={styles.pageContentFlex}
+        contentContainerStyle={styles.onboardingContainer}
+        showsVerticalScrollIndicator={false}
+      >
+        <View style={styles.welcomeCard}>
+          <View style={styles.welcomeIconShield} />
+          <Text style={styles.welcomeTitle}>SENTINEL AUTHENTICATOR</Text>
+          <Text style={styles.welcomeDescription}>
+            Enterprise-grade Identity and Multi-Factor Authentication. Your device functions as a physical possession factor protected by hardware Keystore cryptography.
+          </Text>
+
+          <View style={styles.welcomeActionsGroup}>
+            <TouchableOpacity
+              style={styles.welcomePrimaryBtn}
+              onPress={() => handleSelectTab("PAIR")}
+            >
+              <Text style={styles.welcomePrimaryBtnText}>+ PAIR ACCOUNT KEY</Text>
+            </TouchableOpacity>
+
+            <TouchableOpacity
+              style={styles.welcomePortalBtn}
+              onPress={() => openPortalUrl(PORTAL_URL)}
+            >
+              <Text style={styles.welcomePortalBtnText}>OPEN SENTINEL WEB PORTAL</Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        <View style={styles.instructionCard}>
+          <Text style={styles.instructionHeading}>SETUP INSTRUCTIONS</Text>
+          <Text style={styles.instructionStep}>
+            1. Log in to the Sentinel Web Portal at web-beta-orcin-33.vercel.app.
+          </Text>
+          <Text style={styles.instructionStep}>
+            2. Go to your User Dashboard and select "Pair Mobile Authenticator".
+          </Text>
+          <Text style={styles.instructionStep}>
+            3. Tap "+ PAIR KEY" in the bottom dock and scan your enrollment QR code.
+          </Text>
+        </View>
+      </ScrollView>
+    )
+  );
+
+  const renderPairKeyTab = () => (
+    <ScrollView
+      style={styles.pageContentFlex}
+      contentContainerStyle={styles.scrollPaddingWithDock}
+      showsVerticalScrollIndicator={false}
+    >
+      <View style={styles.enrollmentCard}>
+        <View style={styles.enrollmentHeader}>
+          <Text style={styles.enrollmentTitle}>ENROLL 2FA KEY</Text>
+          <View style={styles.segmentContainer}>
+            <TouchableOpacity
+              style={[styles.segmentTab, enrollmentTab === "SCAN" && styles.segmentTabActive]}
+              onPress={() => setEnrollmentTab("SCAN")}
+            >
+              <Text
+                style={[
+                  styles.segmentTabText,
+                  enrollmentTab === "SCAN" && styles.segmentTabTextActive,
+                ]}
+              >
+                SCAN QR
+              </Text>
+            </TouchableOpacity>
+            <TouchableOpacity
+              style={[styles.segmentTab, enrollmentTab === "MANUAL" && styles.segmentTabActive]}
+              onPress={() => setEnrollmentTab("MANUAL")}
+            >
+              <Text
+                style={[
+                  styles.segmentTabText,
+                  enrollmentTab === "MANUAL" && styles.segmentTabTextActive,
+                ]}
+              >
+                MANUAL
+              </Text>
+            </TouchableOpacity>
+          </View>
+        </View>
+
+        {enrollmentTab === "SCAN" ? (
+          <View>
+            <Text style={styles.modeDescriptionText}>
+              Scan an enrollment QR code directly from the Sentinel Web Portal to automatically pair via the otpauth standard.
+            </Text>
+            <TouchableOpacity style={styles.primaryScanButton} onPress={handleOpenScanner}>
+              <Text style={styles.primaryScanButtonText}>LAUNCH CAMERA SCANNER</Text>
+            </TouchableOpacity>
+          </View>
+        ) : (
+          <View>
+            <Text style={styles.modeDescriptionText}>
+              Enter account identity and Base32 secret key manually for camera-less provisioning.
+            </Text>
+
+            <TextInput
+              style={styles.inputField}
+              placeholder="Account Email (e.g. user@domain.com)"
+              placeholderTextColor="#64748b"
+              value={accountName}
+              onChangeText={setAccountName}
+              autoCapitalize="none"
+              autoCorrect={false}
+            />
+            <TextInput
+              style={styles.inputField}
+              placeholder="Issuer Organization (e.g. Sentinel IAM)"
+              placeholderTextColor="#64748b"
+              value={accountIssuer}
+              onChangeText={setAccountIssuer}
+              autoCapitalize="words"
+              autoCorrect={false}
+            />
+            <TextInput
+              style={[
+                styles.inputField,
+                manualValidationError ? styles.inputFieldError : null,
+              ]}
+              placeholder="Base32 Secret Key (e.g. JBSWY3DPEHPK3PXP)"
+              placeholderTextColor="#64748b"
+              value={secretKey}
+              onChangeText={handleSecretKeyChange}
+              autoCapitalize="characters"
+              autoCorrect={false}
+            />
+
+            {manualValidationError && (
+              <View style={styles.validationErrorBox}>
+                <Text style={styles.validationErrorText}>{manualValidationError}</Text>
+              </View>
+            )}
+
+            <TouchableOpacity
+              style={styles.addKeyButton}
+              onPress={() => {
+                handleAddAccount();
+                if (!manualValidationError && accountName.trim() && secretKey.trim()) {
+                  handleSelectTab("CODES");
+                }
+              }}
+            >
+              <Text style={styles.addKeyButtonText}>ENROLL ACCOUNT KEY</Text>
+            </TouchableOpacity>
+          </View>
+        )}
+      </View>
+    </ScrollView>
+  );
+
+  const renderSystemTab = () => (
+    <ScrollView
+      style={styles.pageContentFlex}
+      contentContainerStyle={styles.scrollPaddingWithDock}
+      showsVerticalScrollIndicator={false}
+    >
+      <View style={styles.securitySectionCard}>
+        <Text style={styles.securitySectionTitle}>SECURITY HARDWARE DIAGNOSTICS</Text>
+
+        <View style={styles.securityDetailRow}>
+          <Text style={styles.securityDetailLabel}>Hardware Keystore Enclave</Text>
+          <Text style={[styles.securityDetailValue, { color: isHardwareVault ? "#54f4fc" : "#94a3b8" }]}>
+            {isHardwareVault ? "HARDWARE-BACKED (AES-256)" : "PERSISTENT STORAGE"}
+          </Text>
+        </View>
+
+        <View style={styles.securityDetailRow}>
+          <Text style={styles.securityDetailLabel}>Biometric Sensor</Text>
+          <Text style={[styles.securityDetailValue, { color: hasBiometricHardware ? "#10b981" : "#94a3b8" }]}>
+            {hasBiometricHardware ? `${biometricTypeLabel} DETECTED` : "NOT AVAILABLE"}
+          </Text>
+        </View>
+
+        <View style={styles.securityDetailRow}>
+          <Text style={styles.securityDetailLabel}>Biometric Enrollment</Text>
+          <Text style={[styles.securityDetailValue, { color: biometricEnrolled ? "#10b981" : "#f59e0b" }]}>
+            {biometricEnrolled ? "ENROLLED ON OS" : "NOT ENROLLED"}
+          </Text>
+        </View>
+
+        <View style={styles.securityDetailRow}>
+          <Text style={styles.securityDetailLabel}>Push Verification Channel</Text>
+          <Text style={[styles.securityDetailValue, { color: pushToken ? "#54f4fc" : "#94a3b8" }]}>
+            {pushToken ? "FCM ACTIVE" : "LOCAL MODE"}
+          </Text>
+        </View>
+      </View>
+
+      <View style={styles.securitySectionCard}>
+        <Text style={styles.securitySectionTitle}>ACCESS PROTECTION POLICY</Text>
+        <Text style={styles.securitySectionSubtitle}>
+          Require biometric authentication or device PIN whenever opening the app.
+        </Text>
+
+        <TouchableOpacity style={styles.biometricSwitchButton} onPress={handleToggleBiometrics}>
+          <View style={styles.switchInfo}>
+            <Text style={styles.switchTitle}>
+              {requireBiometrics ? `Enforce ${biometricTypeLabel} App Lock` : "Direct App Access"}
+            </Text>
+            <Text style={styles.switchDesc}>
+              {requireBiometrics
+                ? "Full-screen device authentication gate is required on app launch."
+                : "Application opens directly into passcodes view."}
+            </Text>
+          </View>
+          <View style={[styles.switchPill, requireBiometrics && styles.switchPillActive]}>
+            <Text style={[styles.switchPillText, requireBiometrics && styles.switchPillTextActive]}>
+              {requireBiometrics ? "ENABLED" : "OFF"}
+            </Text>
+          </View>
+        </TouchableOpacity>
+      </View>
+
+      <View style={styles.securitySectionCard}>
+        <Text style={styles.securitySectionTitle}>ENTERPRISE RESOURCES</Text>
+        <TouchableOpacity
+          style={styles.resourceButton}
+          onPress={() => openPortalUrl(PORTAL_URL)}
+        >
+          <Text style={styles.resourceButtonText}>VISIT SENTINEL WEB PORTAL</Text>
+        </TouchableOpacity>
+      </View>
+    </ScrollView>
+  );
+
   // Full-Screen Native Android Device Lock Gate
   if (requireBiometrics && hasBiometricHardware && !isVaultUnlocked) {
     return (
@@ -803,322 +1111,33 @@ export default function AuthenticatorScreen() {
         </View>
       </View>
 
-      {/* Horizontal Swipable Paged Container (Main Canvas) */}
-      <ScrollView
-        ref={pagerRef}
-        horizontal
-        pagingEnabled
-        showsHorizontalScrollIndicator={false}
-        onMomentumScrollEnd={handleScrollEnd}
-        style={styles.pagerContainer}
-      >
-        {/* TAB 1: PASSCODES */}
-        <View style={[styles.pageItem, { width: pageWidth }]}>
-          {accounts.length > 0 ? (
-            <FlatList
-              data={accounts}
-              keyExtractor={(item) => item.id}
-              contentContainerStyle={styles.listContentWithDock}
-              showsVerticalScrollIndicator={false}
-              renderItem={({ item }) => {
-                let code = "------";
-                try {
-                  code = generateTotp(item.secret);
-                } catch {
-                  code = "------";
-                }
-                const formattedCode =
-                  code.length === 6 ? `${code.slice(0, 3)} ${code.slice(3)}` : code;
-                const isCopied = copiedCodeId === item.id;
-
-                return (
-                  <TouchableOpacity
-                    activeOpacity={0.88}
-                    style={[styles.accountCard, isCopied && styles.accountCardCopied]}
-                    onPress={() => handleCopyCode(item.id, code)}
-                  >
-                    {/* Header: Issuer + Algorithm badge */}
-                    <View style={styles.accountTopRow}>
-                      <View style={styles.accountIdentityGroup}>
-                        <Text style={styles.accountName} numberOfLines={1}>
-                          {item.name}
-                        </Text>
-                        {item.issuer && (
-                          <View style={styles.issuerBadge}>
-                            <Text style={styles.issuerBadgeText}>{item.issuer.toUpperCase()}</Text>
-                          </View>
-                        )}
-                      </View>
-                      <View style={styles.protocolBadge}>
-                        <Text style={styles.protocolBadgeText}>SHA-1 / 30S</Text>
-                      </View>
-                    </View>
-
-                    {/* Middle: Large Monospace Passcode & Quick Action */}
-                    <View style={styles.tokenRow}>
-                      <Text style={styles.totpToken}>{formattedCode}</Text>
-                      <View style={[styles.copyPill, isCopied && styles.copyPillActive]}>
-                        <Text style={[styles.copyPillText, isCopied && styles.copyPillTextActive]}>
-                          {isCopied ? "COPIED" : "TAP TO COPY"}
-                        </Text>
-                      </View>
-                    </View>
-
-                    {/* Footer: Per-Card Synchronized Progress Line & Remaining Seconds */}
-                    <View style={styles.cardProgressRow}>
-                      <View style={styles.cardProgressTrack}>
-                        <View style={[styles.cardProgressBar, { width: `${progressPercent}%` }]} />
-                      </View>
-                      <Text style={styles.cardSecondsText}>{remainingSeconds}s</Text>
-                    </View>
-
-                    {/* Bottom Utility Row */}
-                    <View style={styles.cardUtilityRow}>
-                      <Text style={styles.secretHintText} numberOfLines={1}>
-                        KEY: {item.secret.slice(0, 4)}••••••••{item.secret.slice(-4)}
-                      </Text>
-                      <TouchableOpacity
-                        style={styles.cardDeleteBtn}
-                        onPress={() => confirmDeleteAccount(item.id, item.name, item.issuer)}
-                      >
-                        <Text style={styles.cardDeleteBtnText}>REMOVE</Text>
-                      </TouchableOpacity>
-                    </View>
-                  </TouchableOpacity>
-                );
-              }}
-            />
-          ) : (
-            <ScrollView
-              style={styles.pageContentFlex}
-              contentContainerStyle={styles.onboardingContainer}
-              showsVerticalScrollIndicator={false}
-            >
-              <View style={styles.welcomeCard}>
-                <View style={styles.welcomeIconShield} />
-                <Text style={styles.welcomeTitle}>SENTINEL AUTHENTICATOR</Text>
-                <Text style={styles.welcomeDescription}>
-                  Enterprise-grade Identity and Multi-Factor Authentication. Your device functions as a physical possession factor protected by hardware Keystore cryptography.
-                </Text>
-
-                <View style={styles.welcomeActionsGroup}>
-                  <TouchableOpacity
-                    style={styles.welcomePrimaryBtn}
-                    onPress={() => handleSelectTab("PAIR")}
-                  >
-                    <Text style={styles.welcomePrimaryBtnText}>+ PAIR ACCOUNT KEY</Text>
-                  </TouchableOpacity>
-
-                  <TouchableOpacity
-                    style={styles.welcomePortalBtn}
-                    onPress={() => openPortalUrl(PORTAL_URL)}
-                  >
-                    <Text style={styles.welcomePortalBtnText}>OPEN SENTINEL WEB PORTAL</Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              <View style={styles.instructionCard}>
-                <Text style={styles.instructionHeading}>SETUP INSTRUCTIONS</Text>
-                <Text style={styles.instructionStep}>
-                  1. Log in to the Sentinel Web Portal at web-beta-orcin-33.vercel.app.
-                </Text>
-                <Text style={styles.instructionStep}>
-                  2. Go to your User Dashboard and select "Pair Mobile Authenticator".
-                </Text>
-                <Text style={styles.instructionStep}>
-                  3. Tap "+ PAIR KEY" in the bottom dock and scan your enrollment QR code.
-                </Text>
-              </View>
-            </ScrollView>
-          )}
+      {/* Platform Adaptive Canvas: Direct Tab switching on Web, Swipable Pager on Native Mobile */}
+      {Platform.OS === "web" ? (
+        <View style={styles.webTabContainer}>
+          {activeTab === "CODES" && renderPasscodesTab()}
+          {activeTab === "PAIR" && renderPairKeyTab()}
+          {activeTab === "SECURITY" && renderSystemTab()}
         </View>
-
-        {/* TAB 2: PAIR KEY */}
-        <View style={[styles.pageItem, { width: pageWidth }]}>
-          <ScrollView
-            style={styles.pageContentFlex}
-            contentContainerStyle={styles.scrollPaddingWithDock}
-            showsVerticalScrollIndicator={false}
-          >
-            <View style={styles.enrollmentCard}>
-              <View style={styles.enrollmentHeader}>
-                <Text style={styles.enrollmentTitle}>ENROLL 2FA KEY</Text>
-                <View style={styles.segmentContainer}>
-                  <TouchableOpacity
-                    style={[styles.segmentTab, enrollmentTab === "SCAN" && styles.segmentTabActive]}
-                    onPress={() => setEnrollmentTab("SCAN")}
-                  >
-                    <Text
-                      style={[
-                        styles.segmentTabText,
-                        enrollmentTab === "SCAN" && styles.segmentTabTextActive,
-                      ]}
-                    >
-                      SCAN QR
-                    </Text>
-                  </TouchableOpacity>
-                  <TouchableOpacity
-                    style={[styles.segmentTab, enrollmentTab === "MANUAL" && styles.segmentTabActive]}
-                    onPress={() => setEnrollmentTab("MANUAL")}
-                  >
-                    <Text
-                      style={[
-                        styles.segmentTabText,
-                        enrollmentTab === "MANUAL" && styles.segmentTabTextActive,
-                      ]}
-                    >
-                      MANUAL
-                    </Text>
-                  </TouchableOpacity>
-                </View>
-              </View>
-
-              {enrollmentTab === "SCAN" ? (
-                <View>
-                  <Text style={styles.modeDescriptionText}>
-                    Scan an enrollment QR code directly from the Sentinel Web Portal to automatically pair via the otpauth standard.
-                  </Text>
-                  <TouchableOpacity style={styles.primaryScanButton} onPress={handleOpenScanner}>
-                    <Text style={styles.primaryScanButtonText}>LAUNCH CAMERA SCANNER</Text>
-                  </TouchableOpacity>
-                </View>
-              ) : (
-                <View>
-                  <Text style={styles.modeDescriptionText}>
-                    Enter account identity and Base32 secret key manually for camera-less provisioning.
-                  </Text>
-
-                  <TextInput
-                    style={styles.inputField}
-                    placeholder="Account Email (e.g. user@domain.com)"
-                    placeholderTextColor="#64748b"
-                    value={accountName}
-                    onChangeText={setAccountName}
-                    autoCapitalize="none"
-                    autoCorrect={false}
-                  />
-                  <TextInput
-                    style={styles.inputField}
-                    placeholder="Issuer Organization (e.g. Sentinel IAM)"
-                    placeholderTextColor="#64748b"
-                    value={accountIssuer}
-                    onChangeText={setAccountIssuer}
-                    autoCapitalize="words"
-                    autoCorrect={false}
-                  />
-                  <TextInput
-                    style={[
-                      styles.inputField,
-                      manualValidationError ? styles.inputFieldError : null,
-                    ]}
-                    placeholder="Base32 Secret Key (e.g. JBSWY3DPEHPK3PXP)"
-                    placeholderTextColor="#64748b"
-                    value={secretKey}
-                    onChangeText={handleSecretKeyChange}
-                    autoCapitalize="characters"
-                    autoCorrect={false}
-                  />
-
-                  {manualValidationError && (
-                    <View style={styles.validationErrorBox}>
-                      <Text style={styles.validationErrorText}>{manualValidationError}</Text>
-                    </View>
-                  )}
-
-                  <TouchableOpacity
-                    style={styles.addKeyButton}
-                    onPress={() => {
-                      handleAddAccount();
-                      if (!manualValidationError && accountName.trim() && secretKey.trim()) {
-                        handleSelectTab("CODES");
-                      }
-                    }}
-                  >
-                    <Text style={styles.addKeyButtonText}>ENROLL ACCOUNT KEY</Text>
-                  </TouchableOpacity>
-                </View>
-              )}
-            </View>
-          </ScrollView>
-        </View>
-
-        {/* TAB 3: SYSTEM */}
-        <View style={[styles.pageItem, { width: pageWidth }]}>
-          <ScrollView
-            style={styles.pageContentFlex}
-            contentContainerStyle={styles.scrollPaddingWithDock}
-            showsVerticalScrollIndicator={false}
-          >
-            <View style={styles.securitySectionCard}>
-              <Text style={styles.securitySectionTitle}>SECURITY HARDWARE DIAGNOSTICS</Text>
-
-              <View style={styles.securityDetailRow}>
-                <Text style={styles.securityDetailLabel}>Hardware Keystore Enclave</Text>
-                <Text style={[styles.securityDetailValue, { color: isHardwareVault ? "#54f4fc" : "#94a3b8" }]}>
-                  {isHardwareVault ? "HARDWARE-BACKED (AES-256)" : "PERSISTENT STORAGE"}
-                </Text>
-              </View>
-
-              <View style={styles.securityDetailRow}>
-                <Text style={styles.securityDetailLabel}>Biometric Sensor</Text>
-                <Text style={[styles.securityDetailValue, { color: hasBiometricHardware ? "#10b981" : "#94a3b8" }]}>
-                  {hasBiometricHardware ? `${biometricTypeLabel} DETECTED` : "NOT AVAILABLE"}
-                </Text>
-              </View>
-
-              <View style={styles.securityDetailRow}>
-                <Text style={styles.securityDetailLabel}>Biometric Enrollment</Text>
-                <Text style={[styles.securityDetailValue, { color: biometricEnrolled ? "#10b981" : "#f59e0b" }]}>
-                  {biometricEnrolled ? "ENROLLED ON OS" : "NOT ENROLLED"}
-                </Text>
-              </View>
-
-              <View style={styles.securityDetailRow}>
-                <Text style={styles.securityDetailLabel}>Push Verification Channel</Text>
-                <Text style={[styles.securityDetailValue, { color: pushToken ? "#54f4fc" : "#94a3b8" }]}>
-                  {pushToken ? "FCM ACTIVE" : "LOCAL MODE"}
-                </Text>
-              </View>
-            </View>
-
-            <View style={styles.securitySectionCard}>
-              <Text style={styles.securitySectionTitle}>ACCESS PROTECTION POLICY</Text>
-              <Text style={styles.securitySectionSubtitle}>
-                Require biometric authentication or device PIN whenever opening the app.
-              </Text>
-
-              <TouchableOpacity style={styles.biometricSwitchButton} onPress={handleToggleBiometrics}>
-                <View style={styles.switchInfo}>
-                  <Text style={styles.switchTitle}>
-                    {requireBiometrics ? `Enforce ${biometricTypeLabel} App Lock` : "Direct App Access"}
-                  </Text>
-                  <Text style={styles.switchDesc}>
-                    {requireBiometrics
-                      ? "Full-screen device authentication gate is required on app launch."
-                      : "Application opens directly into passcodes view."}
-                  </Text>
-                </View>
-                <View style={[styles.switchPill, requireBiometrics && styles.switchPillActive]}>
-                  <Text style={[styles.switchPillText, requireBiometrics && styles.switchPillTextActive]}>
-                    {requireBiometrics ? "ENABLED" : "OFF"}
-                  </Text>
-                </View>
-              </TouchableOpacity>
-            </View>
-
-            <View style={styles.securitySectionCard}>
-              <Text style={styles.securitySectionTitle}>ENTERPRISE RESOURCES</Text>
-              <TouchableOpacity
-                style={styles.resourceButton}
-                onPress={() => openPortalUrl(PORTAL_URL)}
-              >
-                <Text style={styles.resourceButtonText}>VISIT SENTINEL WEB PORTAL</Text>
-              </TouchableOpacity>
-            </View>
-          </ScrollView>
-        </View>
-      </ScrollView>
+      ) : (
+        <ScrollView
+          ref={pagerRef}
+          horizontal
+          pagingEnabled
+          showsHorizontalScrollIndicator={false}
+          onMomentumScrollEnd={handleScrollEnd}
+          style={styles.pagerContainer}
+        >
+          <View style={[styles.pageItem, { width: pageWidth }]}>
+            {renderPasscodesTab()}
+          </View>
+          <View style={[styles.pageItem, { width: pageWidth }]}>
+            {renderPairKeyTab()}
+          </View>
+          <View style={[styles.pageItem, { width: pageWidth }]}>
+            {renderSystemTab()}
+          </View>
+        </ScrollView>
+      )}
 
       {/* Industry Standard Bottom Floating Dock */}
       <View style={styles.bottomDockContainer}>
@@ -1530,6 +1549,10 @@ const styles = StyleSheet.create({
     color: "#fb7185",
     letterSpacing: 0.8,
   },
+  webTabContainer: {
+    flex: 1,
+    width: "100%",
+  },
   pagerContainer: {
     flex: 1,
   },
@@ -1538,10 +1561,12 @@ const styles = StyleSheet.create({
   },
   pageContentFlex: {
     flex: 1,
+    width: "100%",
   },
   onboardingContainer: {
     paddingVertical: 16,
     alignItems: "center",
+    width: "100%",
   },
   welcomeCard: {
     backgroundColor: "rgba(15, 23, 42, 0.85)",
