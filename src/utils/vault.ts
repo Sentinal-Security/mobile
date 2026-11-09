@@ -163,3 +163,90 @@ export async function saveVaultSettings(settings: VaultSettings): Promise<boolea
     }
   }
 }
+
+export interface AuditLogEntry {
+  id: string;
+  timestamp: number;
+  eventType:
+    | "LOGIN_APPROVED"
+    | "LOGIN_DENIED"
+    | "ACCOUNT_PAIRED"
+    | "ACCOUNT_DELETED"
+    | "VAULT_UNLOCKED"
+    | "VAULT_LOCKED"
+    | "PIN_CONFIGURED";
+  title: string;
+  details: string;
+  origin?: string;
+  account?: string;
+}
+
+const AUDIT_LOGS_KEY = "@sentinel_audit_logs";
+const MASTER_PIN_KEY = "@sentinel_master_pin";
+
+export async function loadAuditLogs(): Promise<AuditLogEntry[]> {
+  try {
+    const raw = await AsyncStorage.getItem(AUDIT_LOGS_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (Array.isArray(parsed)) return parsed;
+    }
+  } catch (err) {
+    console.warn("Notice loading audit logs:", err);
+  }
+  return [];
+}
+
+export async function recordAuditLog(
+  entry: Omit<AuditLogEntry, "id" | "timestamp">
+): Promise<AuditLogEntry> {
+  const newLog: AuditLogEntry = {
+    ...entry,
+    id: `log_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+    timestamp: Date.now(),
+  };
+
+  try {
+    const existing = await loadAuditLogs();
+    const updated = [newLog, ...existing].slice(0, 60);
+    await AsyncStorage.setItem(AUDIT_LOGS_KEY, JSON.stringify(updated));
+  } catch (err) {
+    console.warn("Notice saving audit log:", err);
+  }
+  return newLog;
+}
+
+export async function clearAuditLogs(): Promise<boolean> {
+  try {
+    await AsyncStorage.removeItem(AUDIT_LOGS_KEY);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+export async function loadMasterPin(): Promise<string | null> {
+  try {
+    const isSecure = await isHardwareVaultAvailable();
+    if (isSecure) {
+      const pin = await SecureStore.getItemAsync(MASTER_PIN_KEY);
+      if (pin) return pin;
+    }
+    return await AsyncStorage.getItem(MASTER_PIN_KEY);
+  } catch {
+    return null;
+  }
+}
+
+export async function saveMasterPin(pin: string): Promise<boolean> {
+  try {
+    const isSecure = await isHardwareVaultAvailable();
+    if (isSecure) {
+      await SecureStore.setItemAsync(MASTER_PIN_KEY, pin, getSecureStoreWriteOptions());
+    }
+    await AsyncStorage.setItem(MASTER_PIN_KEY, pin);
+    return true;
+  } catch {
+    return false;
+  }
+}

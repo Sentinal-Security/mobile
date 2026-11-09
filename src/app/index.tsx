@@ -29,11 +29,17 @@ import { generateTotp, getSecondsRemaining } from "@/utils/totp";
 import { recordMobileTelemetry } from "../../services/api";
 import {
   TotpAccount,
+  AuditLogEntry,
   isHardwareVaultAvailable,
   loadAccountsFromVault,
   saveAccountsToVault,
   loadVaultSettings,
   saveVaultSettings,
+  loadAuditLogs,
+  recordAuditLog,
+  clearAuditLogs,
+  loadMasterPin,
+  saveMasterPin,
 } from "@/utils/vault";
 
 
@@ -100,6 +106,15 @@ export default function AuthenticatorScreen() {
   const [respondingChallenge, setRespondingChallenge] = useState(false);
   const [pushToken, setPushToken] = useState<string | null>(null);
 
+  // Audit Logs & Master PIN State
+  const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
+  const [masterPin, setMasterPin] = useState<string | null>(null);
+  const [isPinSetupMode, setIsPinSetupMode] = useState(false);
+  const [enteredPin, setEnteredPin] = useState("");
+  const [setupPin, setSetupPin] = useState("");
+  const [setupPinConfirm, setSetupPinConfirm] = useState("");
+  const [pinErrorMessage, setPinErrorMessage] = useState<string | null>(null);
+
   // Native dialog and scanner concurrency guards
   const authInFlightRef = useRef(false);
   const scanLockRef = useRef(false);
@@ -143,15 +158,31 @@ export default function AuthenticatorScreen() {
           }
         }
 
+        const storedLogs = (await withTimeout(loadAuditLogs(), 2000)) ?? [];
+        if (isMounted) {
+          setAuditLogs(storedLogs);
+        }
+
+        const storedPin = (await withTimeout(loadMasterPin(), 2000)) ?? null;
+        if (isMounted) {
+          setMasterPin(storedPin);
+        }
+
         const settings = (await withTimeout(loadVaultSettings(), 2000)) ?? {
           requireBiometrics: true,
         };
         enforceBio = settings.requireBiometrics;
         if (isMounted) {
           setRequireBiometrics(enforceBio);
-          if (!enforceBio || !hasHw || !isEnr) {
+          if (!enforceBio) {
             setIsVaultUnlocked(true);
+          } else if (hasHw && isEnr) {
+            setIsVaultUnlocked(false);
+          } else if (storedPin) {
+            setIsVaultUnlocked(false);
           } else {
+            // Mandatory fallback PIN setup for non-biometric devices / web
+            setIsPinSetupMode(true);
             setIsVaultUnlocked(false);
           }
         }
@@ -458,6 +489,64 @@ export default function AuthenticatorScreen() {
     }
   };
 
+  // Master Security PIN Handlers
+  const handleSaveMasterPin = async () => {
+    const cleanPin = setupPin.trim();
+    if (!/^\d{4,8}$/.test(cleanPin)) {
+      setPinErrorMessage("PIN must be 4 to 8 numeric digits.");
+      return;
+    }
+    if (cleanPin !== setupPinConfirm.trim()) {
+      setPinErrorMessage("PIN confirmation does not match. Please re-enter.");
+      return;
+    }
+    await saveMasterPin(cleanPin);
+    setMasterPin(cleanPin);
+    setIsPinSetupMode(false);
+    setIsVaultUnlocked(true);
+    setPinErrorMessage(null);
+    setSetupPin("");
+    setSetupPinConfirm("");
+
+    const newLog = await recordAuditLog({
+      eventType: "PIN_CONFIGURED",
+      title: "Master Security PIN Configured",
+      details: "Configured fallback security PIN for authenticator access",
+    });
+    setAuditLogs((prev) => [newLog, ...prev]);
+    Alert.alert("Security PIN Configured", "Your Master PIN is active. Use this PIN whenever unlocking the authenticator.");
+  };
+
+  const handleUnlockWithPin = async () => {
+    const cleanPin = enteredPin.trim();
+    if (!masterPin) {
+      setIsVaultUnlocked(true);
+      return;
+    }
+    if (cleanPin === masterPin) {
+      setIsVaultUnlocked(true);
+      setEnteredPin("");
+      setPinErrorMessage(null);
+      const newLog = await recordAuditLog({
+        eventType: "VAULT_UNLOCKED",
+        title: "Vault Unlocked",
+        details: "Authenticated via Master Security PIN",
+      });
+      setAuditLogs((prev) => [newLog, ...prev]);
+    } else {
+      setPinErrorMessage("Incorrect PIN. Please try again.");
+      setEnteredPin("");
+    }
+  };
+
+  const handleStartPinChange = () => {
+    setSetupPin("");
+    setSetupPinConfirm("");
+    setPinErrorMessage(null);
+    setIsPinSetupMode(true);
+    setIsVaultUnlocked(false);
+  };
+
   // Authenticate with Android system biometrics or device PIN / Pattern
   const handleUnlockApp = async () => {
     if (authInFlightRef.current) return;
@@ -467,19 +556,27 @@ export default function AuthenticatorScreen() {
       const isEnr = (await withTimeout(LocalAuthentication.isEnrolledAsync(), 2000)) ?? false;
 
       if (!hasHw || !isEnr) {
-        setIsVaultUnlocked(true);
+        if (!masterPin) {
+          setIsPinSetupMode(true);
+        }
         return;
       }
 
       const result = await LocalAuthentication.authenticateAsync({
         promptMessage: "Unlock Sentinel Security Authenticator",
         cancelLabel: "Cancel",
-        fallbackLabel: "Use Device Screen Lock",
+        fallbackLabel: masterPin ? "Use Master PIN" : "Use Screen Lock",
         disableDeviceFallback: false,
       });
 
       if (result.success) {
         setIsVaultUnlocked(true);
+        const newLog = await recordAuditLog({
+          eventType: "VAULT_UNLOCKED",
+          title: "Vault Unlocked",
+          details: "Authenticated via device biometrics",
+        });
+        setAuditLogs((prev) => [newLog, ...prev]);
         recordMobileTelemetry({
           actionType: "APP_LOCK_UNLOCK_SUCCESS",
           details: "User authenticated to open Sentinel Authenticator",
@@ -487,15 +584,25 @@ export default function AuthenticatorScreen() {
       }
     } catch (err) {
       console.warn("Device authentication notice:", err);
-      setIsVaultUnlocked(true);
+      if (!masterPin) {
+        setIsVaultUnlocked(true);
+      }
     } finally {
       authInFlightRef.current = false;
     }
   };
 
   // Lock app
-  const handleLockApp = () => {
+  const handleLockApp = async () => {
     setIsVaultUnlocked(false);
+    setEnteredPin("");
+    setPinErrorMessage(null);
+    const newLog = await recordAuditLog({
+      eventType: "VAULT_LOCKED",
+      title: "Vault Locked",
+      details: "User manually locked authenticator vault",
+    });
+    setAuditLogs((prev) => [newLog, ...prev]);
   };
 
   // Toggle biometric enforcement preference
@@ -560,10 +667,29 @@ export default function AuthenticatorScreen() {
       clearTimeout(timer);
       const json = await res.json();
       if (json.success) {
+        const challengeOrigin = pendingChallenge.clientOrigin;
+        const challengeEmail = pendingChallenge.email;
+        const challengeId = pendingChallenge.id;
         setPendingChallenge(null);
         if (action === "APPROVE") {
+          const log = await recordAuditLog({
+            eventType: "LOGIN_APPROVED",
+            title: "Login Request Approved",
+            details: `Approved challenge #${challengeId} with verification code ${selectedCode || "confirmed"}`,
+            origin: challengeOrigin,
+            account: challengeEmail,
+          });
+          setAuditLogs((prev) => [log, ...prev]);
           Alert.alert("Authorization Approved", "Sign-in approved successfully.");
         } else {
+          const log = await recordAuditLog({
+            eventType: "LOGIN_DENIED",
+            title: "Login Request Denied",
+            details: `Declined sign-in challenge #${challengeId}`,
+            origin: challengeOrigin,
+            account: challengeEmail,
+          });
+          setAuditLogs((prev) => [log, ...prev]);
           Alert.alert("Authorization Denied", "Sign-in request denied.");
         }
       } else {
@@ -635,6 +761,13 @@ export default function AuthenticatorScreen() {
       details: `User enrolled 2FA key for ${cleanName}${cleanIssuer ? ` (${cleanIssuer})` : ""}`,
       userEmail: cleanName,
     });
+
+    recordAuditLog({
+      eventType: "ACCOUNT_PAIRED",
+      title: "Account Key Paired",
+      details: `Enrolled TOTP secret (${cleanIssuer || "Sentinel IAM"})`,
+      account: cleanName,
+    }).then((log) => setAuditLogs((prev) => [log, ...prev]));
   };
 
   const confirmDeleteAccount = (id: string, name: string, issuer?: string) => {
@@ -655,6 +788,12 @@ export default function AuthenticatorScreen() {
               });
               return updated;
             });
+            recordAuditLog({
+              eventType: "ACCOUNT_DELETED",
+              title: "Account Key Removed",
+              details: `Deleted TOTP credential for ${displayName}`,
+              account: name,
+            }).then((log) => setAuditLogs((prev) => [log, ...prev]));
             recordMobileTelemetry({
               actionType: "REMOVE_KEY",
               details: `User deleted enrolled 2FA key for ${displayName}`,
@@ -1007,6 +1146,13 @@ export default function AuthenticatorScreen() {
             {pushToken ? "FCM ACTIVE" : "LOCAL MODE"}
           </Text>
         </View>
+
+        <View style={styles.securityDetailRow}>
+          <Text style={styles.securityDetailLabel}>Master Security PIN</Text>
+          <Text style={[styles.securityDetailValue, { color: masterPin ? "#10b981" : "#f59e0b" }]}>
+            {masterPin ? "CONFIGURED" : "MANDATORY SETUP"}
+          </Text>
+        </View>
       </View>
 
       <View style={styles.securitySectionCard}>
@@ -1032,6 +1178,100 @@ export default function AuthenticatorScreen() {
             </Text>
           </View>
         </TouchableOpacity>
+
+        <View style={styles.policyDivider} />
+
+        <View style={styles.pinConfigRow}>
+          <View style={styles.switchInfo}>
+            <Text style={styles.switchTitle}>Master Security PIN</Text>
+            <Text style={styles.switchDesc}>
+              {masterPin
+                ? "Configured fallback security PIN for devices without native biometrics."
+                : "Required fallback security PIN. Must be set up to use app."}
+            </Text>
+          </View>
+          <TouchableOpacity style={styles.pinChangeButton} onPress={handleStartPinChange}>
+            <Text style={styles.pinChangeButtonText}>
+              {masterPin ? "CHANGE PIN" : "SET PIN"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Security Audit & Login Logs */}
+      <View style={styles.securitySectionCard}>
+        <View style={styles.auditHeaderRow}>
+          <Text style={styles.securitySectionTitle}>SECURITY AUDIT & LOGIN LOGS</Text>
+          {auditLogs.length > 0 && (
+            <TouchableOpacity
+              style={styles.auditClearBtn}
+              onPress={async () => {
+                await clearAuditLogs();
+                setAuditLogs([]);
+              }}
+            >
+              <Text style={styles.auditClearBtnText}>CLEAR</Text>
+            </TouchableOpacity>
+          )}
+        </View>
+        <Text style={styles.securitySectionSubtitle}>
+          Local audit timeline of login approvals, access rejections, and security state changes.
+        </Text>
+
+        {auditLogs.length > 0 ? (
+          <View style={styles.auditList}>
+            {auditLogs.slice(0, 20).map((log) => {
+              const dateStr = new Date(log.timestamp).toLocaleTimeString("en-US", {
+                hour: "2-digit",
+                minute: "2-digit",
+                second: "2-digit",
+                hour12: true,
+              });
+              const isApproval = log.eventType === "LOGIN_APPROVED";
+              const isDenial = log.eventType === "LOGIN_DENIED";
+              const isPair = log.eventType === "ACCOUNT_PAIRED";
+
+              return (
+                <View key={log.id} style={styles.auditItem}>
+                  <View style={styles.auditTopRow}>
+                    <View
+                      style={[
+                        styles.auditTypeBadge,
+                        isApproval && styles.auditTypeBadgeSuccess,
+                        isDenial && styles.auditTypeBadgeDanger,
+                        isPair && styles.auditTypeBadgeInfo,
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.auditTypeBadgeText,
+                          isApproval && styles.auditTypeBadgeTextSuccess,
+                          isDenial && styles.auditTypeBadgeTextDanger,
+                          isPair && styles.auditTypeBadgeTextInfo,
+                        ]}
+                      >
+                        {log.eventType.replace(/_/g, " ")}
+                      </Text>
+                    </View>
+                    <Text style={styles.auditTimeText}>{dateStr}</Text>
+                  </View>
+                  <Text style={styles.auditItemTitle}>{log.title}</Text>
+                  <Text style={styles.auditItemDetails}>{log.details}</Text>
+                  {log.origin ? (
+                    <Text style={styles.auditItemOrigin}>ORIGIN: {log.origin}</Text>
+                  ) : null}
+                  {log.account ? (
+                    <Text style={styles.auditItemAccount}>IDENTITY: {log.account}</Text>
+                  ) : null}
+                </View>
+              );
+            })}
+          </View>
+        ) : (
+          <View style={styles.emptyAuditBox}>
+            <Text style={styles.emptyAuditText}>No audit activity recorded yet.</Text>
+          </View>
+        )}
       </View>
 
       <View style={styles.securitySectionCard}>
@@ -1046,8 +1286,77 @@ export default function AuthenticatorScreen() {
     </ScrollView>
   );
 
-  // Full-Screen Native Android Device Lock Gate
-  if (requireBiometrics && hasBiometricHardware && !isVaultUnlocked) {
+  // Full-Screen Security Lock Gate
+  if (!isVaultUnlocked) {
+    if (isPinSetupMode || (!masterPin && (!hasBiometricHardware || !biometricEnrolled))) {
+      return (
+        <View style={styles.outerRoot}>
+          <SafeAreaView style={styles.lockGateContainer}>
+            <View style={styles.lockGateCenter}>
+              <Image
+                source={require("../../assets/images/icon.png")}
+                style={styles.lockGateLogo}
+                resizeMode="contain"
+              />
+              <View style={styles.setupBadge}>
+                <View style={styles.setupDot} />
+                <Text style={styles.setupBadgeText}>MANDATORY SECURITY ENROLLMENT</Text>
+              </View>
+              <Text style={styles.lockTitle}>Set Master Security PIN</Text>
+              <Text style={styles.lockSubtitle}>
+                Native biometrics not available. Configure a 4 to 8 digit Master PIN to protect your TOTP credentials and authorization challenges.
+              </Text>
+
+              {pinErrorMessage && (
+                <View style={styles.pinErrorBanner}>
+                  <Text style={styles.pinErrorBannerText}>{pinErrorMessage}</Text>
+                </View>
+              )}
+
+              <TextInput
+                style={styles.pinInputField}
+                placeholder="Create Security PIN (4-8 digits)"
+                placeholderTextColor="#64748b"
+                value={setupPin}
+                onChangeText={(t) => {
+                  setSetupPin(t.replace(/\D/g, "").slice(0, 8));
+                  setPinErrorMessage(null);
+                }}
+                keyboardType="number-pad"
+                secureTextEntry={true}
+                maxLength={8}
+              />
+
+              <TextInput
+                style={styles.pinInputField}
+                placeholder="Confirm Security PIN"
+                placeholderTextColor="#64748b"
+                value={setupPinConfirm}
+                onChangeText={(t) => {
+                  setSetupPinConfirm(t.replace(/\D/g, "").slice(0, 8));
+                  setPinErrorMessage(null);
+                }}
+                keyboardType="number-pad"
+                secureTextEntry={true}
+                maxLength={8}
+              />
+
+              <TouchableOpacity style={styles.primaryUnlockButton} onPress={handleSaveMasterPin}>
+                <Text style={styles.primaryUnlockButtonText}>SAVE PIN & UNLOCK APP</Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={styles.portalHelperButton}
+                onPress={() => openPortalUrl(PORTAL_URL)}
+              >
+                <Text style={styles.portalHelperButtonText}>OPEN SENTINEL WEB PORTAL</Text>
+              </TouchableOpacity>
+            </View>
+          </SafeAreaView>
+        </View>
+      );
+    }
+
     return (
       <View style={styles.outerRoot}>
         <SafeAreaView style={styles.lockGateContainer}>
@@ -1063,14 +1372,49 @@ export default function AuthenticatorScreen() {
             </View>
             <Text style={styles.lockTitle}>Sentinel Authenticator</Text>
             <Text style={styles.lockSubtitle}>
-              Biometric verification or device screen lock required to access enterprise TOTP passcodes and verification tools.
+              Authentication required to access enterprise TOTP passcodes and verification tools.
             </Text>
 
-            <TouchableOpacity style={styles.primaryUnlockButton} onPress={handleUnlockApp}>
-              <Text style={styles.primaryUnlockButtonText}>
-                UNLOCK WITH {biometricTypeLabel} / PIN
-              </Text>
-            </TouchableOpacity>
+            {hasBiometricHardware && biometricEnrolled && (
+              <TouchableOpacity style={styles.primaryUnlockButton} onPress={handleUnlockApp}>
+                <Text style={styles.primaryUnlockButtonText}>
+                  UNLOCK WITH {biometricTypeLabel}
+                </Text>
+              </TouchableOpacity>
+            )}
+
+            {hasBiometricHardware && biometricEnrolled && masterPin && (
+              <Text style={styles.orDividerText}>— OR ENTER MASTER PIN —</Text>
+            )}
+
+            {masterPin && (
+              <View style={styles.pinUnlockGroup}>
+                <TextInput
+                  style={styles.pinInputField}
+                  placeholder="Enter Master Security PIN"
+                  placeholderTextColor="#64748b"
+                  value={enteredPin}
+                  onChangeText={(t) => {
+                    setEnteredPin(t.replace(/\D/g, "").slice(0, 8));
+                    setPinErrorMessage(null);
+                  }}
+                  keyboardType="number-pad"
+                  secureTextEntry={true}
+                  maxLength={8}
+                  onSubmitEditing={handleUnlockWithPin}
+                />
+
+                {pinErrorMessage && (
+                  <View style={styles.pinErrorBanner}>
+                    <Text style={styles.pinErrorBannerText}>{pinErrorMessage}</Text>
+                  </View>
+                )}
+
+                <TouchableOpacity style={styles.primaryUnlockButton} onPress={handleUnlockWithPin}>
+                  <Text style={styles.primaryUnlockButtonText}>UNLOCK WITH PIN</Text>
+                </TouchableOpacity>
+              </View>
+            )}
 
             <TouchableOpacity
               style={styles.portalHelperButton}
@@ -2601,5 +2945,205 @@ const styles = StyleSheet.create({
     fontSize: 11,
     fontWeight: "800",
     letterSpacing: 1,
+  },
+  policyDivider: {
+    height: 1,
+    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    marginVertical: 14,
+  },
+  pinConfigRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    gap: 12,
+  },
+  pinChangeButton: {
+    backgroundColor: "rgba(84, 244, 252, 0.12)",
+    borderWidth: 1,
+    borderColor: "#54f4fc",
+    paddingHorizontal: 12,
+    paddingVertical: 8,
+    borderRadius: 6,
+  },
+  pinChangeButtonText: {
+    color: "#54f4fc",
+    fontSize: 10,
+    fontWeight: "800",
+    letterSpacing: 0.6,
+  },
+  auditHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 4,
+  },
+  auditClearBtn: {
+    borderWidth: 1,
+    borderColor: "rgba(244, 63, 94, 0.4)",
+    backgroundColor: "rgba(244, 63, 94, 0.08)",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 4,
+  },
+  auditClearBtnText: {
+    color: "#fb7185",
+    fontSize: 9,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
+  auditList: {
+    marginTop: 12,
+    gap: 10,
+  },
+  auditItem: {
+    backgroundColor: "rgba(7, 12, 22, 0.85)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.15)",
+    borderRadius: 6,
+    padding: 12,
+  },
+  auditTopRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    justifyContent: "space-between",
+    marginBottom: 6,
+  },
+  auditTypeBadge: {
+    paddingHorizontal: 8,
+    paddingVertical: 3,
+    borderRadius: 4,
+    backgroundColor: "rgba(148, 163, 184, 0.15)",
+  },
+  auditTypeBadgeSuccess: {
+    backgroundColor: "rgba(16, 185, 129, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(16, 185, 129, 0.4)",
+  },
+  auditTypeBadgeDanger: {
+    backgroundColor: "rgba(239, 68, 68, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.4)",
+  },
+  auditTypeBadgeInfo: {
+    backgroundColor: "rgba(84, 244, 252, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.4)",
+  },
+  auditTypeBadgeText: {
+    fontSize: 9,
+    fontWeight: "800",
+    color: "#94a3b8",
+    letterSpacing: 0.6,
+  },
+  auditTypeBadgeTextSuccess: {
+    color: "#10b981",
+  },
+  auditTypeBadgeTextDanger: {
+    color: "#ef4444",
+  },
+  auditTypeBadgeTextInfo: {
+    color: "#54f4fc",
+  },
+  auditTimeText: {
+    fontSize: 10,
+    color: "#64748b",
+    fontFamily: "monospace",
+  },
+  auditItemTitle: {
+    fontSize: 12,
+    fontWeight: "700",
+    color: "#e2e8f0",
+    marginBottom: 2,
+  },
+  auditItemDetails: {
+    fontSize: 11,
+    color: "#94a3b8",
+    lineHeight: 16,
+    marginBottom: 4,
+  },
+  auditItemOrigin: {
+    fontSize: 10,
+    color: "#54f4fc",
+    fontFamily: "monospace",
+  },
+  auditItemAccount: {
+    fontSize: 10,
+    color: "#a855f7",
+    fontFamily: "monospace",
+  },
+  emptyAuditBox: {
+    paddingVertical: 18,
+    alignItems: "center",
+  },
+  emptyAuditText: {
+    color: "#64748b",
+    fontSize: 11,
+    fontStyle: "italic",
+  },
+  setupBadge: {
+    flexDirection: "row",
+    alignItems: "center",
+    backgroundColor: "rgba(245, 158, 11, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.4)",
+    paddingHorizontal: 10,
+    paddingVertical: 4,
+    borderRadius: 16,
+    marginBottom: 12,
+  },
+  setupDot: {
+    width: 6,
+    height: 6,
+    borderRadius: 3,
+    backgroundColor: "#f59e0b",
+    marginRight: 6,
+  },
+  setupBadgeText: {
+    color: "#fbbf24",
+    fontSize: 9.5,
+    fontWeight: "800",
+    letterSpacing: 0.8,
+  },
+  pinInputField: {
+    backgroundColor: "rgba(15, 23, 42, 0.8)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.25)",
+    borderRadius: 8,
+    paddingHorizontal: 14,
+    paddingVertical: 12,
+    color: "#ffffff",
+    fontSize: 14,
+    width: "100%",
+    marginBottom: 10,
+    textAlign: "center",
+    letterSpacing: 4,
+    fontWeight: "700",
+  },
+  pinErrorBanner: {
+    backgroundColor: "rgba(239, 68, 68, 0.15)",
+    borderWidth: 1,
+    borderColor: "rgba(239, 68, 68, 0.4)",
+    paddingVertical: 8,
+    paddingHorizontal: 12,
+    borderRadius: 6,
+    width: "100%",
+    marginBottom: 10,
+    alignItems: "center",
+  },
+  pinErrorBannerText: {
+    color: "#ef4444",
+    fontSize: 10.5,
+    fontWeight: "700",
+  },
+  orDividerText: {
+    color: "#64748b",
+    fontSize: 10,
+    fontWeight: "700",
+    letterSpacing: 0.8,
+    marginVertical: 14,
+  },
+  pinUnlockGroup: {
+    width: "100%",
+    alignItems: "center",
   },
 });
