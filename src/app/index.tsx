@@ -80,6 +80,7 @@ export default function AuthenticatorScreen() {
   const [isHardwareVault, setIsHardwareVault] = useState<boolean | null>(null);
   const [activeTab, setActiveTab] = useState<"CODES" | "PAIR" | "SECURITY">("CODES");
   const [copiedCodeId, setCopiedCodeId] = useState<string | null>(null);
+  const [accountToDelete, setAccountToDelete] = useState<TotpAccount | null>(null);
   const pagerRef = useRef<ScrollView>(null);
 
   // Biometric Inherence Factor State
@@ -865,40 +866,51 @@ export default function AuthenticatorScreen() {
     Alert.alert("Account Paired", `Successfully enrolled 2FA for ${cleanName}`);
   };
 
+  const handleInitiateDelete = (account: TotpAccount, e?: any) => {
+    e?.stopPropagation?.();
+    setAccountToDelete(account);
+  };
+
+  const executeDeleteAccount = async (target: TotpAccount) => {
+    const displayName = target.issuer ? `${target.issuer} (${target.name})` : target.name;
+
+    // Resilient account deletion matching by ID or name + secret fallback
+    setAccounts((prev) => {
+      const updated = prev.filter((acc) => {
+        if (target.id && acc.id) return acc.id !== target.id;
+        return !(acc.name === target.name && acc.secret === target.secret);
+      });
+      saveAccountsToVault(updated).catch((err) => {
+        console.error("Failed to persist account removal to vault:", err);
+      });
+      return updated;
+    });
+
+    setAccountToDelete(null);
+
+    try {
+      const log = await recordAuditLog({
+        eventType: "ACCOUNT_DELETED",
+        title: "Account Key Removed",
+        details: `Deleted TOTP credential for ${displayName}`,
+        account: target.name,
+      });
+      setAuditLogs((prev) => [log, ...prev]);
+    } catch (err) {
+      console.warn("Notice recording audit log:", err);
+    }
+
+    recordMobileTelemetry({
+      actionType: "REMOVE_KEY",
+      details: `User deleted enrolled 2FA key for ${displayName}`,
+      userEmail: target.name,
+      severity: "WARN",
+    });
+  };
+
   const confirmDeleteAccount = (id: string, name: string, issuer?: string) => {
-    const displayName = issuer ? `${issuer} (${name})` : name;
-    Alert.alert(
-      "Remove Account",
-      `Are you sure you want to remove ${displayName}? This will delete the 2FA key from the hardware vault.`,
-      [
-        { text: "Cancel", style: "cancel" },
-        {
-          text: "Remove",
-          style: "destructive",
-          onPress: () => {
-            setAccounts((prev) => {
-              const updated = prev.filter((acc) => acc.id !== id);
-              saveAccountsToVault(updated).catch((err) => {
-                console.error("Failed to persist account removal to vault:", err);
-              });
-              return updated;
-            });
-            recordAuditLog({
-              eventType: "ACCOUNT_DELETED",
-              title: "Account Key Removed",
-              details: `Deleted TOTP credential for ${displayName}`,
-              account: name,
-            }).then((log) => setAuditLogs((prev) => [log, ...prev]));
-            recordMobileTelemetry({
-              actionType: "REMOVE_KEY",
-              details: `User deleted enrolled 2FA key for ${displayName}`,
-              userEmail: name,
-              severity: "WARN",
-            });
-          },
-        },
-      ]
-    );
+    const matched = accounts.find((a) => a.id === id) || { id, name, secret: "", issuer };
+    handleInitiateDelete(matched);
   };
 
   const handleOpenScanner = async () => {
@@ -980,7 +992,7 @@ export default function AuthenticatorScreen() {
     accounts.length > 0 ? (
       <FlatList
         data={accounts}
-        keyExtractor={(item) => item.id}
+        keyExtractor={(item, index) => item.id || `${item.name}-${item.secret}-${index}`}
         contentContainerStyle={styles.listContentWithDock}
         showsVerticalScrollIndicator={false}
         renderItem={({ item }) => {
@@ -1042,7 +1054,9 @@ export default function AuthenticatorScreen() {
                 </Text>
                 <TouchableOpacity
                   style={styles.cardDeleteBtn}
-                  onPress={() => confirmDeleteAccount(item.id, item.name, item.issuer)}
+                  onPress={(e) => handleInitiateDelete(item, e)}
+                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                  accessibilityLabel={`Remove ${item.name}`}
                 >
                   <Text style={styles.cardDeleteBtnText}>REMOVE</Text>
                 </TouchableOpacity>
@@ -1745,6 +1759,63 @@ export default function AuthenticatorScreen() {
                   {respondingChallenge ? "PROCESSING..." : "DENY REQUEST"}
                 </Text>
               </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+      )}
+
+      {/* Account Deletion Confirmation Modal */}
+      {accountToDelete !== null && (
+        <Modal
+          visible={true}
+          animationType="fade"
+          transparent={true}
+          onRequestClose={() => setAccountToDelete(null)}
+        >
+          <View style={styles.deleteModalOverlay}>
+            <View style={styles.deleteModalCard}>
+              <View style={styles.deleteHeaderRow}>
+                <View style={styles.deleteWarningDot} />
+                <Text style={styles.deleteModalTitle}>REMOVE 2FA PASSCODE</Text>
+              </View>
+
+              <View style={styles.deleteDetailsBox}>
+                <Text style={styles.deleteIdentityLabel}>ACCOUNT IDENTITY</Text>
+                <Text style={styles.deleteIdentityValue}>{accountToDelete.name}</Text>
+                {accountToDelete.issuer ? (
+                  <>
+                    <Text style={styles.deleteIssuerLabel}>ISSUER / SYSTEM</Text>
+                    <Text style={styles.deleteIssuerValue}>{accountToDelete.issuer}</Text>
+                  </>
+                ) : null}
+                {accountToDelete.secret ? (
+                  <Text style={styles.deleteKeyHintText}>
+                    KEY: {accountToDelete.secret.slice(0, 4)}••••••••{accountToDelete.secret.slice(-4)}
+                  </Text>
+                ) : null}
+              </View>
+
+              <Text style={styles.deleteWarningNotice}>
+                Are you sure you want to remove this account? This will permanently delete the TOTP secret key from your vault. You will no longer be able to generate authentication codes for this account.
+              </Text>
+
+              <View style={styles.deleteModalActionsRow}>
+                <TouchableOpacity
+                  style={styles.deleteModalCancelBtn}
+                  onPress={() => setAccountToDelete(null)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.deleteModalCancelText}>CANCEL</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={styles.deleteModalConfirmBtn}
+                  onPress={() => executeDeleteAccount(accountToDelete)}
+                  activeOpacity={0.8}
+                >
+                  <Text style={styles.deleteModalConfirmText}>REMOVE KEY</Text>
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
         </Modal>
@@ -3275,5 +3346,129 @@ const styles = StyleSheet.create({
   pinUnlockGroup: {
     width: "100%",
     alignItems: "center",
+  },
+  deleteModalOverlay: {
+    flex: 1,
+    backgroundColor: "rgba(0, 0, 0, 0.85)",
+    justifyContent: "center",
+    alignItems: "center",
+    padding: 20,
+  },
+  deleteModalCard: {
+    width: "100%",
+    maxWidth: 380,
+    backgroundColor: "#070c16",
+    borderWidth: 1.5,
+    borderColor: "rgba(244, 63, 94, 0.6)",
+    borderRadius: 12,
+    padding: 20,
+    shadowColor: "#f43f5e",
+    shadowOffset: { width: 0, height: 4 },
+    shadowOpacity: 0.25,
+    shadowRadius: 16,
+    elevation: 10,
+  },
+  deleteHeaderRow: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 8,
+    marginBottom: 14,
+  },
+  deleteWarningDot: {
+    width: 8,
+    height: 8,
+    borderRadius: 4,
+    backgroundColor: "#f43f5e",
+  },
+  deleteModalTitle: {
+    fontSize: 12,
+    fontWeight: "800",
+    color: "#f43f5e",
+    letterSpacing: 1.2,
+  },
+  deleteDetailsBox: {
+    backgroundColor: "#0b1322",
+    borderWidth: 1,
+    borderColor: "rgba(244, 63, 94, 0.2)",
+    borderRadius: 8,
+    padding: 12,
+    marginBottom: 14,
+  },
+  deleteIdentityLabel: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#94a3b8",
+    letterSpacing: 1,
+    marginBottom: 2,
+  },
+  deleteIdentityValue: {
+    fontSize: 13,
+    fontWeight: "700",
+    color: "#ffffff",
+    marginBottom: 8,
+  },
+  deleteIssuerLabel: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#94a3b8",
+    letterSpacing: 1,
+    marginBottom: 2,
+  },
+  deleteIssuerValue: {
+    fontSize: 11,
+    fontWeight: "600",
+    color: "#54f4fc",
+    marginBottom: 6,
+  },
+  deleteKeyHintText: {
+    fontSize: 9.5,
+    fontFamily: "monospace",
+    color: "#64748b",
+    letterSpacing: 0.5,
+  },
+  deleteWarningNotice: {
+    fontSize: 11,
+    color: "#cbd5e1",
+    lineHeight: 16,
+    marginBottom: 18,
+  },
+  deleteModalActionsRow: {
+    flexDirection: "row",
+    gap: 10,
+  },
+  deleteModalCancelBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    backgroundColor: "rgba(255, 255, 255, 0.05)",
+    borderWidth: 1,
+    borderColor: "rgba(255, 255, 255, 0.15)",
+    borderRadius: 6,
+    alignItems: "center",
+    justifyContent: "center",
+  },
+  deleteModalCancelText: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#94a3b8",
+    letterSpacing: 0.8,
+  },
+  deleteModalConfirmBtn: {
+    flex: 1,
+    paddingVertical: 11,
+    backgroundColor: "#e11d48",
+    borderRadius: 6,
+    alignItems: "center",
+    justifyContent: "center",
+    shadowColor: "#e11d48",
+    shadowOffset: { width: 0, height: 2 },
+    shadowOpacity: 0.35,
+    shadowRadius: 6,
+    elevation: 3,
+  },
+  deleteModalConfirmText: {
+    fontSize: 11,
+    fontWeight: "800",
+    color: "#ffffff",
+    letterSpacing: 0.8,
   },
 });
