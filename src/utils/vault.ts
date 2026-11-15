@@ -83,8 +83,7 @@ export async function loadAccountsFromVault(): Promise<TotpAccount[]> {
         }
       }
     }
-  } catch (err) {
-    console.warn("Notice loading accounts from security vault:", err);
+  } catch {
   }
   return [];
 }
@@ -104,8 +103,7 @@ export async function saveAccountsToVault(accounts: TotpAccount[]): Promise<bool
       await AsyncStorage.setItem(LEGACY_STORAGE_KEY, serialized);
       return true;
     }
-  } catch (err) {
-    console.error("Failed to persist accounts to security vault:", err);
+  } catch {
     // Secondary fallback
     try {
       await AsyncStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(accounts));
@@ -133,8 +131,7 @@ export async function loadVaultSettings(): Promise<VaultSettings> {
     if (legacy) {
       return JSON.parse(legacy);
     }
-  } catch (err) {
-    console.warn("Notice loading vault settings:", err);
+  } catch {
   }
   return defaultSettings;
 }
@@ -153,8 +150,7 @@ export async function saveVaultSettings(settings: VaultSettings): Promise<boolea
       await AsyncStorage.setItem(SETTINGS_LEGACY_KEY, serialized);
       return true;
     }
-  } catch (err) {
-    console.warn("Notice saving vault settings:", err);
+  } catch {
     try {
       await AsyncStorage.setItem(SETTINGS_LEGACY_KEY, JSON.stringify(settings));
       return true;
@@ -182,7 +178,8 @@ export interface AuditLogEntry {
 }
 
 const AUDIT_LOGS_KEY = "@sentinel_audit_logs";
-const MASTER_PIN_KEY = "@sentinel_master_pin";
+const MASTER_PIN_KEY = "sentinel_master_pin";
+const LEGACY_MASTER_PIN_KEY = "@sentinel_master_pin";
 
 export async function loadAuditLogs(): Promise<AuditLogEntry[]> {
   try {
@@ -191,9 +188,7 @@ export async function loadAuditLogs(): Promise<AuditLogEntry[]> {
       const parsed = JSON.parse(raw);
       if (Array.isArray(parsed)) return parsed;
     }
-  } catch (err) {
-    console.warn("Notice loading audit logs:", err);
-  }
+  } catch {}
   return [];
 }
 
@@ -210,9 +205,7 @@ export async function recordAuditLog(
     const existing = await loadAuditLogs();
     const updated = [newLog, ...existing].slice(0, 60);
     await AsyncStorage.setItem(AUDIT_LOGS_KEY, JSON.stringify(updated));
-  } catch (err) {
-    console.warn("Notice saving audit log:", err);
-  }
+  } catch {}
   return newLog;
 }
 
@@ -231,8 +224,15 @@ export async function loadMasterPin(): Promise<string | null> {
     if (isSecure) {
       const pin = await SecureStore.getItemAsync(MASTER_PIN_KEY);
       if (pin) return pin;
+      const legacy = await AsyncStorage.getItem(LEGACY_MASTER_PIN_KEY);
+      if (legacy) {
+        await SecureStore.setItemAsync(MASTER_PIN_KEY, legacy, getSecureStoreWriteOptions());
+        await AsyncStorage.removeItem(LEGACY_MASTER_PIN_KEY);
+        return legacy;
+      }
+      return null;
     }
-    return await AsyncStorage.getItem(MASTER_PIN_KEY);
+    return await AsyncStorage.getItem(LEGACY_MASTER_PIN_KEY);
   } catch {
     return null;
   }
@@ -243,8 +243,10 @@ export async function saveMasterPin(pin: string): Promise<boolean> {
     const isSecure = await isHardwareVaultAvailable();
     if (isSecure) {
       await SecureStore.setItemAsync(MASTER_PIN_KEY, pin, getSecureStoreWriteOptions());
+      await AsyncStorage.removeItem(LEGACY_MASTER_PIN_KEY).catch(() => {});
+      return true;
     }
-    await AsyncStorage.setItem(MASTER_PIN_KEY, pin);
+    await AsyncStorage.setItem(LEGACY_MASTER_PIN_KEY, pin);
     return true;
   } catch {
     return false;

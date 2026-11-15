@@ -19,13 +19,18 @@ import {
 } from "react-native";
 import * as WebBrowser from "expo-web-browser";
 import * as Clipboard from "expo-clipboard";
-import AsyncStorage from "@react-native-async-storage/async-storage";
 import { SafeAreaView } from "react-native-safe-area-context";
 import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Notifications from "expo-notifications";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as SplashScreen from "expo-splash-screen";
-import { generateTotp, getSecondsRemaining } from "@/utils/totp";
+import {
+  generateTotp,
+  getSecondsRemaining,
+  parseOtpAuthUri,
+  buildChallengeOptions,
+  normalizeBase32Secret,
+} from "@/utils/totp";
 import { recordMobileTelemetry } from "../../services/api";
 import {
   TotpAccount,
@@ -42,17 +47,19 @@ import {
   saveMasterPin,
 } from "@/utils/vault";
 
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => setTimeout(resolve, ms));
-}
-
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
+  let timer: ReturnType<typeof setTimeout> | null = null;
   const safePromise = promise.catch(() => null as unknown as T);
-  return Promise.race([
-    safePromise,
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), ms)),
-  ]);
+  try {
+    return await Promise.race([
+      safePromise,
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), ms);
+      }),
+    ]);
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
 }
 
 
@@ -194,8 +201,7 @@ export default function AuthenticatorScreen() {
         if (isMounted) {
           setAccounts(storedAccounts);
         }
-      } catch (err) {
-        console.warn("Security vault initialization warning:", err);
+      } catch {
       } finally {
         if (isMounted) {
           setIsLoaded(true);
@@ -296,10 +302,7 @@ export default function AuthenticatorScreen() {
         if (data?.challengeId) {
           const chId = Number(data.challengeId);
           const matchCode = String(data.matchCode || "42");
-          const matchNum = parseInt(matchCode, 10) || 42;
-          const d1 = (((matchNum + 17) % 90) + 10).toString();
-          const d2 = (((matchNum + 43) % 90) + 10).toString();
-          const opts = [matchCode, d1, d2].sort(() => Math.random() - 0.5);
+          const opts = buildChallengeOptions(matchCode);
 
           setPendingChallenge({
             id: chId,
@@ -311,8 +314,7 @@ export default function AuthenticatorScreen() {
           });
         }
       });
-    } catch (err) {
-      console.warn("Notification listener registration notice:", err);
+    } catch {
     }
 
     return () => {
@@ -331,6 +333,10 @@ export default function AuthenticatorScreen() {
     const appStateSub = AppState.addEventListener("change", (nextState) => {
       if (nextState === "active") {
         setRemainingSeconds(getSecondsRemaining());
+      } else if (nextState === "background" && (requireBiometrics || masterPin)) {
+        setIsVaultUnlocked(false);
+        setEnteredPin("");
+        setPinErrorMessage(null);
       }
     });
 
@@ -338,7 +344,7 @@ export default function AuthenticatorScreen() {
       clearInterval(timer);
       appStateSub.remove();
     };
-  }, []);
+  }, [requireBiometrics, masterPin]);
 
   // Poll for active push verification challenges strictly after startup settles
   useEffect(() => {
@@ -363,9 +369,6 @@ export default function AuthenticatorScreen() {
           emailsToCheck.add(acc.name.trim().toLowerCase());
         }
       });
-      if (accountName.trim().includes("@")) {
-        emailsToCheck.add(accountName.trim().toLowerCase());
-      }
 
       if (emailsToCheck.size === 0) return;
 
@@ -387,10 +390,7 @@ export default function AuthenticatorScreen() {
 
             setPendingChallenge((prev) => {
               if (prev && prev.id === ch.id) return prev;
-              const matchNum = parseInt(ch.matchCode, 10) || 42;
-              const d1 = (((matchNum + 17) % 90) + 10).toString();
-              const d2 = (((matchNum + 43) % 90) + 10).toString();
-              const opts = [ch.matchCode, d1, d2].sort(() => Math.random() - 0.5);
+              const opts = buildChallengeOptions(String(ch.matchCode || "42"));
 
               // Schedule native Android system notification banner safely
               try {
@@ -442,7 +442,7 @@ export default function AuthenticatorScreen() {
         clearInterval(pollInterval);
       }
     };
-  }, [accounts, accountName, isLoaded, isStartupComplete, showScanner]);
+  }, [accounts, isLoaded, isStartupComplete, showScanner]);
 
 
 
@@ -585,11 +585,8 @@ export default function AuthenticatorScreen() {
           details: "User authenticated to open Sentinel Authenticator",
         });
       }
-    } catch (err) {
-      console.warn("Device authentication notice:", err);
-      if (!masterPin) {
-        setIsVaultUnlocked(true);
-      }
+    } catch {
+      Alert.alert("Authentication Error", "Unable to verify device credentials. Please try again.");
     } finally {
       authInFlightRef.current = false;
     }
@@ -645,9 +642,13 @@ export default function AuthenticatorScreen() {
             Alert.alert("Authentication Canceled", "Biometric or PIN verification is required to approve access.");
             return;
           }
+        } else if (!isVaultUnlocked) {
+          Alert.alert("Vault Locked", "Unlock the Sentinel Authenticator vault before approving sign-in requests.");
+          return;
         }
-      } catch (err) {
-        console.warn("Local authentication bypassed or not available:", err);
+      } catch {
+        Alert.alert("Authentication Failed", "Could not verify device identity. Sign-in approval aborted.");
+        return;
       } finally {
         authInFlightRef.current = false;
       }
@@ -732,46 +733,21 @@ export default function AuthenticatorScreen() {
   // Secret key input validator & URI parser
   const handleSecretKeyChange = (text: string) => {
     // Detect otpauth:// URI pasted in the secret key field
-    if (text.trim().startsWith("otpauth://")) {
-      const rawUri = text.trim();
-      let extractedSecret = "";
-      let extractedName = "";
-      let extractedIssuer = "";
-
-      const secretMatch = rawUri.match(/[?&]secret=([A-Za-z2-7]+)/i);
-      if (secretMatch && secretMatch[1]) {
-        extractedSecret = secretMatch[1].toUpperCase().replace(/0/g, "O").replace(/1/g, "I");
-      }
-
-      const issuerMatch = rawUri.match(/[?&]issuer=([^&]+)/i);
-      if (issuerMatch) {
-        extractedIssuer = decodeURIComponent(issuerMatch[1]);
-      }
-
-      const labelMatch = rawUri.match(/otpauth:\/\/totp\/([^?]+)/i);
-      if (labelMatch && labelMatch[1]) {
-        const rawLabel = decodeURIComponent(labelMatch[1]);
-        if (rawLabel.includes(":")) {
-          const parts = rawLabel.split(":");
-          if (!extractedIssuer) extractedIssuer = parts[0];
-          extractedName = parts[1] || parts[0];
-        } else {
-          extractedName = rawLabel;
-        }
-      }
-
-      if (extractedSecret) {
-        setSecretKey(extractedSecret);
-        if (extractedName) setAccountName(extractedName);
-        if (extractedIssuer) setAccountIssuer(extractedIssuer);
+    if (text.trim().toLowerCase().startsWith("otpauth://")) {
+      const parsed = parseOtpAuthUri(text);
+      if (parsed) {
+        setSecretKey(parsed.secret);
+        if (parsed.accountName) setAccountName(parsed.accountName);
+        if (parsed.issuer) setAccountIssuer(parsed.issuer);
         setManualValidationError(null);
-        setResolvedIdentity(`${extractedName || "Enrolled Account"}${extractedIssuer ? ` (${extractedIssuer})` : ""}`);
+        setResolvedIdentity(
+          `${parsed.accountName || "Enrolled Account"}${parsed.issuer ? ` (${parsed.issuer})` : ""}`
+        );
         return;
       }
     }
 
-    let clean = text.toUpperCase().replace(/\s+/g, "");
-    clean = clean.replace(/0/g, "O").replace(/1/g, "I");
+    const clean = normalizeBase32Secret(text);
     setSecretKey(clean);
 
     if (clean.length > 0) {
@@ -792,7 +768,7 @@ export default function AuthenticatorScreen() {
   };
 
   const handleAddAccount = async (name?: string, secret?: string, issuer?: string) => {
-    let cleanSecret = (secret || secretKey).trim().toUpperCase().replace(/\s+/g, "").replace(/0/g, "O").replace(/1/g, "I");
+    const cleanSecret = normalizeBase32Secret(secret || secretKey);
     let cleanName = (name || accountName).trim();
     let cleanIssuer = (issuer || accountIssuer).trim();
 
@@ -806,17 +782,27 @@ export default function AuthenticatorScreen() {
       return;
     }
 
+    if (accounts.some((acc) => normalizeBase32Secret(acc.secret) === cleanSecret)) {
+      Alert.alert("Duplicate Account", "This 2FA secret key is already enrolled in your vault.");
+      return;
+    }
+
     // Auto-resolve identity from security gateway if name is not set
     if (!cleanName) {
       try {
-        const res = await fetch(`${API_BASE_URL}/api/mfa/resolve-secret?secret=${encodeURIComponent(cleanSecret)}`);
+        const controller = new AbortController();
+        const timer = setTimeout(() => controller.abort(), 4000);
+        const res = await fetch(
+          `${API_BASE_URL}/api/mfa/resolve-secret?secret=${encodeURIComponent(cleanSecret)}`,
+          { signal: controller.signal }
+        );
+        clearTimeout(timer);
         const json = await res.json();
         if (json.success && json.data) {
           if (json.data.email) cleanName = json.data.email;
           if (json.data.issuer && !cleanIssuer) cleanIssuer = json.data.issuer;
         }
-      } catch (err) {
-        console.warn("Auto-resolve failed, continuing with fallback:", err);
+      } catch {
       }
     }
 
@@ -837,9 +823,7 @@ export default function AuthenticatorScreen() {
 
     setAccounts((prev) => {
       const updated = [newAccount, ...prev];
-      saveAccountsToVault(updated).catch((err) => {
-        console.error("Failed to persist enrolled account to vault:", err);
-      });
+      saveAccountsToVault(updated).catch(() => {});
       return updated;
     });
     setAccountName("");
@@ -880,9 +864,7 @@ export default function AuthenticatorScreen() {
         if (target.id && acc.id) return acc.id !== target.id;
         return !(acc.name === target.name && acc.secret === target.secret);
       });
-      saveAccountsToVault(updated).catch((err) => {
-        console.error("Failed to persist account removal to vault:", err);
-      });
+      saveAccountsToVault(updated).catch(() => {});
       return updated;
     });
 
@@ -896,8 +878,7 @@ export default function AuthenticatorScreen() {
         account: target.name,
       });
       setAuditLogs((prev) => [log, ...prev]);
-    } catch (err) {
-      console.warn("Notice recording audit log:", err);
+    } catch {
     }
 
     recordMobileTelemetry({
@@ -906,11 +887,6 @@ export default function AuthenticatorScreen() {
       userEmail: target.name,
       severity: "WARN",
     });
-  };
-
-  const confirmDeleteAccount = (id: string, name: string, issuer?: string) => {
-    const matched = accounts.find((a) => a.id === id) || { id, name, secret: "", issuer };
-    handleInitiateDelete(matched);
   };
 
   const handleOpenScanner = async () => {
@@ -937,49 +913,19 @@ export default function AuthenticatorScreen() {
     scanLockRef.current = true;
 
     // Handle otpauth://totp/URI format
-    if (data.startsWith("otpauth://")) {
-      let secret = "";
-      let name = "";
-      let issuer = "";
-
-      const secretMatch = data.match(/[?&]secret=([A-Za-z2-7]+)/i);
-      if (secretMatch && secretMatch[1]) {
-        secret = secretMatch[1].toUpperCase();
-      }
-
-      const issuerMatch = data.match(/[?&]issuer=([^&]+)/i);
-      if (issuerMatch) {
-        issuer = decodeURIComponent(issuerMatch[1]);
-      }
-
-      const labelMatch = data.match(/otpauth:\/\/totp\/([^?]+)/i);
-      if (labelMatch && labelMatch[1]) {
-        const rawLabel = decodeURIComponent(labelMatch[1]);
-        if (rawLabel.includes(":")) {
-          const parts = rawLabel.split(":");
-          if (!issuer) issuer = parts[0];
-          name = parts[1] || parts[0];
-        } else {
-          name = rawLabel;
-        }
-      }
-
-      if (!name && issuer) {
-        name = issuer;
-      }
-
-      if (secret) {
-        handleAddAccount(name || "Sentinel Account", secret, issuer);
-        Alert.alert("Account Paired", `Successfully enrolled 2FA for ${name || "Sentinel Account"}`);
+    if (data.trim().toLowerCase().startsWith("otpauth://")) {
+      const parsed = parseOtpAuthUri(data);
+      if (parsed) {
+        const displayName = parsed.accountName || parsed.issuer || "Sentinel Account";
+        handleAddAccount(displayName, parsed.secret, parsed.issuer);
         return;
       }
     }
 
     // Direct Base32 key fallback
-    const cleanSecret = data.trim().toUpperCase().replace(/\s+/g, "");
+    const cleanSecret = normalizeBase32Secret(data);
     if (cleanSecret.length >= 8 && /^[A-Z2-7]+$/.test(cleanSecret)) {
       handleAddAccount("Enrolled Account", cleanSecret, "Sentinel IAM");
-      Alert.alert("Account Paired", "Successfully enrolled 2FA secret key from QR code.");
     } else {
       setShowScanner(false);
       Alert.alert("Invalid QR Code", "Scanned code does not contain a valid Base32 2FA secret.");

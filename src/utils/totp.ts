@@ -163,3 +163,67 @@ export function generateTotp(base32Secret: string, epochSeconds: number = Math.f
 export function getSecondsRemaining(): number {
   return 30 - (Math.floor(Date.now() / 1000) % 30);
 }
+
+export function normalizeBase32Secret(raw: string): string {
+  return raw
+    .trim()
+    .toUpperCase()
+    .replace(/[^A-Z2-7]/g, (ch) => (ch === "0" ? "O" : ch === "1" ? "I" : ""));
+}
+
+export interface ParsedOtpAuth {
+  secret: string;
+  issuer?: string;
+  accountName?: string;
+}
+
+function safeDecodeURIComponent(value: string): string {
+  try {
+    return decodeURIComponent(value);
+  } catch {
+    return value;
+  }
+}
+
+export function parseOtpAuthUri(rawUri: string): ParsedOtpAuth | null {
+  const trimmed = rawUri.trim();
+  if (!trimmed.toLowerCase().startsWith("otpauth://")) {
+    return null;
+  }
+  const secretMatch = trimmed.match(/[?&]secret=([^&]+)/i);
+  if (!secretMatch?.[1]) return null;
+  const secret = normalizeBase32Secret(safeDecodeURIComponent(secretMatch[1]));
+  if (!secret) return null;
+
+  const issuerMatch = trimmed.match(/[?&]issuer=([^&]+)/i);
+  let issuer = issuerMatch?.[1] ? safeDecodeURIComponent(issuerMatch[1]).trim() : undefined;
+
+  const labelMatch = trimmed.match(/^otpauth:\/\/totp\/([^?]+)/i);
+  let accountName: string | undefined;
+  if (labelMatch?.[1]) {
+    const decodedLabel = safeDecodeURIComponent(labelMatch[1]).trim();
+    if (decodedLabel.includes(":")) {
+      const [labelIssuer, ...rest] = decodedLabel.split(":");
+      if (!issuer && labelIssuer.trim()) {
+        issuer = labelIssuer.trim();
+      }
+      accountName = rest.join(":").trim();
+    } else {
+      accountName = decodedLabel;
+    }
+  }
+  return { secret, issuer, accountName };
+}
+
+export function buildChallengeOptions(matchCode: string): string[] {
+  const parsed = Number.parseInt(matchCode, 10);
+  const target = Number.isFinite(parsed) && parsed >= 10 && parsed <= 99 ? parsed : 42;
+  const options = new Set<string>([String(target)]);
+  const offsets = [17, 43, 29, 61, 7];
+  for (const offset of offsets) {
+    if (options.size >= 3) break;
+    const decoy = ((target + offset) % 90) + 10;
+    options.add(String(decoy));
+  }
+  return Array.from(options).sort();
+}
