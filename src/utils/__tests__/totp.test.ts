@@ -33,7 +33,7 @@ test("parseOtpAuthUri parses valid URI and handles malformed percent encoding sa
   // Malformed % sequence must not throw URIError
   const malformed = parseOtpAuthUri("otpauth://totp/bad%ZZlabel?secret=JBSWY3DP&issuer=Bad%2");
   assert.ok(malformed);
-  assert.equal(malformed.secret, "JBSWY3DP");
+  assert.equal(malformed?.secret, "JBSWY3DP");
   assert.equal(parseOtpAuthUri("https://example.com"), null);
 });
 
