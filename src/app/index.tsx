@@ -24,6 +24,7 @@ import { CameraView, useCameraPermissions } from "expo-camera";
 import * as Notifications from "expo-notifications";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as SplashScreen from "expo-splash-screen";
+import * as Device from "expo-device";
 import {
   generateTotp,
   getSecondsRemaining,
@@ -31,20 +32,30 @@ import {
   buildChallengeOptions,
   normalizeBase32Secret,
 } from "@/utils/totp";
-import { recordMobileTelemetry } from "../../services/api";
+import {
+  recordMobileTelemetry,
+  bindDevice,
+  unbindDevice,
+  fetchAccountActivity,
+  type ServerAuditLogEntry,
+} from "../../services/api";
 import {
   TotpAccount,
   AuditLogEntry,
   isHardwareVaultAvailable,
+  getOrCreateDeviceUuid,
   loadAccountsFromVault,
   saveAccountsToVault,
   loadVaultSettings,
   saveVaultSettings,
   loadAuditLogs,
   recordAuditLog,
-  clearAuditLogs,
   loadMasterPin,
   saveMasterPin,
+  verifyHashedPin,
+  loadPinLockoutState,
+  recordPinFailure,
+  resetPinFailures,
 } from "@/utils/vault";
 
 async function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T | null> {
@@ -113,12 +124,23 @@ export default function AuthenticatorScreen() {
 
   // Out-of-band Push Challenge
   const [pendingChallenge, setPendingChallenge] = useState<PendingChallenge | null>(null);
+  const [isChallengeMinimized, setIsChallengeMinimized] = useState(false);
   const [respondingChallenge, setRespondingChallenge] = useState(false);
   const [pushToken, setPushToken] = useState<string | null>(null);
+  const [deviceUuid, setDeviceUuid] = useState<string | null>(null);
+  const deviceLabel = Device.modelName || Device.deviceName || `Sentinel ${Platform.OS.toUpperCase()}`;
+
+  // Clock Skew & Per-Account Server Activity
+  const [clockDriftSeconds, setClockDriftSeconds] = useState<number>(0);
+  const [activityAccount, setActivityAccount] = useState<TotpAccount | null>(null);
+  const [serverActivityLogs, setServerActivityLogs] = useState<ServerAuditLogEntry[]>([]);
+  const [loadingActivity, setLoadingActivity] = useState(false);
+  const [activityError, setActivityError] = useState<string | null>(null);
 
   // Audit Logs & Master PIN State
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
   const [masterPin, setMasterPin] = useState<string | null>(null);
+  const [pinLockoutUntil, setPinLockoutUntil] = useState<number>(0);
   const [isPinSetupMode, setIsPinSetupMode] = useState(false);
   const [enteredPin, setEnteredPin] = useState("");
   const [setupPin, setSetupPin] = useState("");
@@ -128,6 +150,7 @@ export default function AuthenticatorScreen() {
   // Native dialog and scanner concurrency guards
   const authInFlightRef = useRef(false);
   const scanLockRef = useRef(false);
+  const resolveDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const getCameraPermissionRef = useRef(getCameraPermission);
   getCameraPermissionRef.current = getCameraPermission;
 
@@ -166,6 +189,17 @@ export default function AuthenticatorScreen() {
           } else {
             setBiometricTypeLabel("DEVICE PIN");
           }
+        }
+
+        const [storedUuid, lockoutState] = await Promise.all([
+          withTimeout(getOrCreateDeviceUuid(), 1500),
+          withTimeout(loadPinLockoutState(), 1500),
+        ]);
+        if (isMounted && storedUuid) {
+          setDeviceUuid(storedUuid);
+        }
+        if (isMounted && lockoutState && lockoutState.lockoutUntil > Date.now()) {
+          setPinLockoutUntil(lockoutState.lockoutUntil);
         }
 
         const storedLogs = (await withTimeout(loadAuditLogs(), 2000)) ?? [];
@@ -264,34 +298,36 @@ export default function AuthenticatorScreen() {
     };
   }, []);
 
-  // Sync device push token to backend for enrolled accounts with proof of possession
+  // Bind this physical device to enrolled Sentinel accounts with proof of possession
   useEffect(() => {
-    if (!pushToken || !isStartupComplete) return;
+    if (!deviceUuid || !isStartupComplete) return;
 
     accounts.forEach((acc) => {
+      if (acc.status === "REVOKED" || acc.status === "UNLINKED") return;
       if (acc.name && acc.name.includes("@") && acc.secret) {
         try {
           const totpCode = generateTotp(acc.secret);
-          const controller = new AbortController();
-          const timer = setTimeout(() => controller.abort(), 4000);
-          fetch(`${API_BASE_URL}/api/mfa/register-device`, {
-            method: "POST",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({
-              email: acc.name.trim().toLowerCase(),
-              pushToken,
-              totpCode,
-            }),
-            signal: controller.signal,
+          bindDevice({
+            email: acc.name.trim().toLowerCase(),
+            deviceUuid,
+            deviceName: deviceLabel,
+            platform: Platform.OS,
+            pushToken,
+            totpCode,
           })
-            .then(() => clearTimeout(timer))
-            .catch(() => clearTimeout(timer));
+            .then((res) => {
+              if (res?.data?.serverEpochMs) {
+                const drift = Math.round(Math.abs(Date.now() - res.data.serverEpochMs) / 1000);
+                setClockDriftSeconds(drift);
+              }
+            })
+            .catch(() => {});
         } catch {
           // Ignore transient TOTP calculation notice during mount
         }
       }
     });
-  }, [pushToken, accounts, isStartupComplete]);
+  }, [pushToken, deviceUuid, accounts, isStartupComplete]);
 
   // Handle tap on system push notification banner
   useEffect(() => {
@@ -365,6 +401,7 @@ export default function AuthenticatorScreen() {
 
       const emailsToCheck = new Set<string>();
       accounts.forEach((acc) => {
+        if (acc.status === "REVOKED" || acc.status === "UNLINKED") return;
         if (acc.name && acc.name.includes("@")) {
           emailsToCheck.add(acc.name.trim().toLowerCase());
         }
@@ -377,19 +414,41 @@ export default function AuthenticatorScreen() {
         try {
           const controller = new AbortController();
           const timer = setTimeout(() => controller.abort(), 4000);
+          const devParam = deviceUuid ? `&deviceUuid=${encodeURIComponent(deviceUuid)}` : "";
           const res = await fetch(
-            `${API_BASE_URL}/api/mfa/challenge/pending?email=${encodeURIComponent(email)}`,
+            `${API_BASE_URL}/api/mfa/challenge/pending?email=${encodeURIComponent(email)}${devParam}`,
             { signal: controller.signal }
           );
           clearTimeout(timer);
           if (!res.ok) continue;
           const json = await res.json();
+          if (json.data?.serverEpochMs) {
+            const drift = Math.round(Math.abs(Date.now() - json.data.serverEpochMs) / 1000);
+            setClockDriftSeconds(drift);
+          }
+          if (json.data?.deviceRevoked || json.data?.mfaDisabled) {
+            const nextStatus: TotpAccount["status"] = json.data.deviceRevoked ? "REVOKED" : "UNLINKED";
+            setAccounts((prev) => {
+              let changed = false;
+              const updated = prev.map((a) => {
+                if (a.name?.trim().toLowerCase() === email && a.status !== nextStatus) {
+                  changed = true;
+                  return { ...a, status: nextStatus };
+                }
+                return a;
+              });
+              if (changed) saveAccountsToVault(updated).catch(() => {});
+              return changed ? updated : prev;
+            });
+            continue;
+          }
           if (json.success && json.data?.hasPending && json.data.challenge) {
             const ch = json.data.challenge;
             if (!isMounted || authInFlightRef.current) return;
 
             setPendingChallenge((prev) => {
               if (prev && prev.id === ch.id) return prev;
+              setIsChallengeMinimized(false);
               const opts = buildChallengeOptions(String(ch.matchCode || "42"));
 
               // Schedule native Android system notification banner safely
@@ -503,8 +562,10 @@ export default function AuthenticatorScreen() {
       setPinErrorMessage("PIN confirmation does not match. Please re-enter.");
       return;
     }
-    await saveMasterPin(cleanPin);
-    setMasterPin(cleanPin);
+    const storedHash = await saveMasterPin(cleanPin);
+    await resetPinFailures();
+    setPinLockoutUntil(0);
+    setMasterPin(storedHash || cleanPin);
     setIsPinSetupMode(false);
     setIsVaultUnlocked(true);
     setPinErrorMessage(null);
@@ -514,19 +575,32 @@ export default function AuthenticatorScreen() {
     const newLog = await recordAuditLog({
       eventType: "PIN_CONFIGURED",
       title: "Master Security PIN Configured",
-      details: "Configured fallback security PIN for authenticator access",
+      details: "Configured hashed fallback security PIN for authenticator access",
     });
     setAuditLogs((prev) => [newLog, ...prev]);
     Alert.alert("Security PIN Configured", "Your Master PIN is active. Use this PIN whenever unlocking the authenticator.");
   };
 
   const handleUnlockWithPin = async () => {
+    const now = Date.now();
+    if (pinLockoutUntil > now) {
+      const secs = Math.ceil((pinLockoutUntil - now) / 1000);
+      setPinErrorMessage(`Too many failed attempts. Try again in ${secs}s.`);
+      return;
+    }
+
     const cleanPin = enteredPin.trim();
     if (!masterPin) {
       setIsVaultUnlocked(true);
       return;
     }
-    if (cleanPin === masterPin) {
+    if (verifyHashedPin(cleanPin, masterPin)) {
+      await resetPinFailures();
+      setPinLockoutUntil(0);
+      if (!masterPin.startsWith("v1$")) {
+        const migrated = await saveMasterPin(cleanPin);
+        if (migrated) setMasterPin(migrated);
+      }
       setIsVaultUnlocked(true);
       setEnteredPin("");
       setPinErrorMessage(null);
@@ -537,8 +611,16 @@ export default function AuthenticatorScreen() {
       });
       setAuditLogs((prev) => [newLog, ...prev]);
     } else {
-      setPinErrorMessage("Incorrect PIN. Please try again.");
+      const nextLock = await recordPinFailure();
       setEnteredPin("");
+      if (nextLock.lockoutUntil > Date.now()) {
+        setPinLockoutUntil(nextLock.lockoutUntil);
+        const secs = Math.ceil((nextLock.lockoutUntil - Date.now()) / 1000);
+        setPinErrorMessage(`Too many failed attempts. Locked for ${secs}s.`);
+      } else {
+        const remaining = 5 - (nextLock.failedAttempts % 5);
+        setPinErrorMessage(`Incorrect PIN. ${remaining} attempt${remaining === 1 ? "" : "s"} before temporary lockout.`);
+      }
     }
   };
 
@@ -665,6 +747,8 @@ export default function AuthenticatorScreen() {
           challengeId: pendingChallenge.id,
           action,
           selectedCode,
+          deviceUuid,
+          deviceName: deviceLabel,
         }),
         signal: controller.signal,
       });
@@ -759,9 +843,17 @@ export default function AuthenticatorScreen() {
         setResolvedIdentity(null);
       } else {
         setManualValidationError(null);
-        resolveSecretIdentity(clean);
+        if (resolveDebounceRef.current) {
+          clearTimeout(resolveDebounceRef.current);
+        }
+        resolveDebounceRef.current = setTimeout(() => {
+          resolveSecretIdentity(clean);
+        }, 500);
       }
     } else {
+      if (resolveDebounceRef.current) {
+        clearTimeout(resolveDebounceRef.current);
+      }
       setManualValidationError(null);
       setResolvedIdentity(null);
     }
@@ -855,8 +947,47 @@ export default function AuthenticatorScreen() {
     setAccountToDelete(account);
   };
 
+  const handleOpenAccountActivity = async (account: TotpAccount) => {
+    setActivityAccount(account);
+    setServerActivityLogs([]);
+    setActivityError(null);
+
+    if (!account.name || !account.name.includes("@") || !deviceUuid) {
+      setActivityError("Server activity is available for Sentinel email-bound accounts.");
+      return;
+    }
+
+    setLoadingActivity(true);
+    try {
+      const totpCode = generateTotp(account.secret);
+      const res = await fetchAccountActivity({
+        email: account.name.trim().toLowerCase(),
+        totpCode,
+        deviceUuid,
+        limit: 25,
+      });
+      if (res.success && Array.isArray(res.data)) {
+        setServerActivityLogs(res.data);
+      } else {
+        setActivityError(res.message || "Unable to load server account activity.");
+      }
+    } catch {
+      setActivityError("Network error while fetching account activity.");
+    } finally {
+      setLoadingActivity(false);
+    }
+  };
+
   const executeDeleteAccount = async (target: TotpAccount) => {
     const displayName = target.issuer ? `${target.issuer} (${target.name})` : target.name;
+
+    // Unbind this specific physical device on backend if this is a Sentinel email account
+    if (target.name && target.name.includes("@") && deviceUuid) {
+      unbindDevice({
+        email: target.name.trim().toLowerCase(),
+        deviceUuid,
+      }).catch(() => {});
+    }
 
     // Resilient account deletion matching by ID or name + secret fallback
     setAccounts((prev) => {
@@ -872,9 +1003,9 @@ export default function AuthenticatorScreen() {
 
     try {
       const log = await recordAuditLog({
-        eventType: "ACCOUNT_DELETED",
-        title: "Account Key Removed",
-        details: `Deleted TOTP credential for ${displayName}`,
+        eventType: "DEVICE_UNBOUND",
+        title: "Device Unbound & Key Removed",
+        details: `Unbound ${deviceLabel} and removed local TOTP credential for ${displayName}. Account MFA remains active.`,
         account: target.name,
       });
       setAuditLogs((prev) => [log, ...prev]);
@@ -882,8 +1013,8 @@ export default function AuthenticatorScreen() {
     }
 
     recordMobileTelemetry({
-      actionType: "REMOVE_KEY",
-      details: `User deleted enrolled 2FA key for ${displayName}`,
+      actionType: "DEVICE_UNBOUND",
+      details: `User unbound ${deviceLabel} and removed enrolled key for ${displayName}`,
       userEmail: target.name,
       severity: "WARN",
     });
@@ -941,6 +1072,27 @@ export default function AuthenticatorScreen() {
         keyExtractor={(item, index) => item.id || `${item.name}-${item.secret}-${index}`}
         contentContainerStyle={styles.listContentWithDock}
         showsVerticalScrollIndicator={false}
+        ListHeaderComponent={
+          <>
+            {clockDriftSeconds > 15 && (
+              <View style={styles.driftWarningBanner}>
+                <Text style={styles.driftWarningText}>
+                  CLOCK DRIFT DETECTED ({clockDriftSeconds}s): TOTP codes may be rejected. Enable automatic network time in device settings.
+                </Text>
+              </View>
+            )}
+            {pendingChallenge && isChallengeMinimized && (
+              <TouchableOpacity
+                style={styles.minimizedChallengeBanner}
+                onPress={() => setIsChallengeMinimized(false)}
+              >
+                <Text style={styles.minimizedChallengeText}>
+                  PENDING SIGN-IN REQUEST FOR {pendingChallenge.email.toUpperCase()} — TAP TO REVIEW
+                </Text>
+              </TouchableOpacity>
+            )}
+          </>
+        }
         renderItem={({ item }) => {
           let code = "------";
           try {
@@ -967,6 +1119,13 @@ export default function AuthenticatorScreen() {
                   {item.issuer && (
                     <View style={styles.issuerBadge}>
                       <Text style={styles.issuerBadgeText}>{item.issuer.toUpperCase()}</Text>
+                    </View>
+                  )}
+                  {(item.status === "REVOKED" || item.status === "UNLINKED") && (
+                    <View style={styles.revokedBadge}>
+                      <Text style={styles.revokedBadgeText}>
+                        {item.status === "REVOKED" ? "DEVICE UNBOUND" : "MFA DISABLED"}
+                      </Text>
                     </View>
                   )}
                 </View>
@@ -998,14 +1157,27 @@ export default function AuthenticatorScreen() {
                 <Text style={styles.secretHintText} numberOfLines={1}>
                   KEY: {item.secret.slice(0, 4)}••••••••{item.secret.slice(-4)}
                 </Text>
-                <TouchableOpacity
-                  style={styles.cardDeleteBtn}
-                  onPress={(e) => handleInitiateDelete(item, e)}
-                  hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
-                  accessibilityLabel={`Remove ${item.name}`}
-                >
-                  <Text style={styles.cardDeleteBtnText}>REMOVE</Text>
-                </TouchableOpacity>
+                <View style={styles.cardActionsGroup}>
+                  <TouchableOpacity
+                    style={styles.cardActivityBtn}
+                    onPress={(e) => {
+                      e?.stopPropagation?.();
+                      handleOpenAccountActivity(item);
+                    }}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    accessibilityLabel={`Activity for ${item.name}`}
+                  >
+                    <Text style={styles.cardActivityBtnText}>ACTIVITY</Text>
+                  </TouchableOpacity>
+                  <TouchableOpacity
+                    style={styles.cardDeleteBtn}
+                    onPress={(e) => handleInitiateDelete(item, e)}
+                    hitSlop={{ top: 8, bottom: 8, left: 8, right: 8 }}
+                    accessibilityLabel={`Remove ${item.name}`}
+                  >
+                    <Text style={styles.cardDeleteBtnText}>UNBIND</Text>
+                  </TouchableOpacity>
+                </View>
               </View>
             </TouchableOpacity>
           );
@@ -1213,7 +1385,14 @@ export default function AuthenticatorScreen() {
         <View style={styles.securityDetailRow}>
           <Text style={styles.securityDetailLabel}>Master Security PIN</Text>
           <Text style={[styles.securityDetailValue, { color: masterPin ? "#10b981" : "#f59e0b" }]}>
-            {masterPin ? "CONFIGURED" : "MANDATORY SETUP"}
+            {masterPin ? "CONFIGURED (HASHED)" : "MANDATORY SETUP"}
+          </Text>
+        </View>
+
+        <View style={styles.securityDetailRow}>
+          <Text style={styles.securityDetailLabel}>Device Identity</Text>
+          <Text style={[styles.securityDetailValue, { color: "#54f4fc" }]} numberOfLines={1}>
+            {deviceLabel} ({deviceUuid ? deviceUuid.slice(0, 12) : "INIT"})
           </Text>
         </View>
       </View>
@@ -1261,24 +1440,14 @@ export default function AuthenticatorScreen() {
         </View>
       </View>
 
-      {/* Security Audit & Login Logs */}
+      {/* Security Audit & Login Logs (Immutable Local Trail) */}
       <View style={styles.securitySectionCard}>
         <View style={styles.auditHeaderRow}>
           <Text style={styles.securitySectionTitle}>SECURITY AUDIT & LOGIN LOGS</Text>
-          {auditLogs.length > 0 && (
-            <TouchableOpacity
-              style={styles.auditClearBtn}
-              onPress={async () => {
-                await clearAuditLogs();
-                setAuditLogs([]);
-              }}
-            >
-              <Text style={styles.auditClearBtnText}>CLEAR</Text>
-            </TouchableOpacity>
-          )}
+          <Text style={styles.immutableBadgeText}>IMMUTABLE</Text>
         </View>
         <Text style={styles.securitySectionSubtitle}>
-          Local audit timeline of login approvals, access rejections, and security state changes.
+          Encrypted local audit timeline of login approvals, device bindings, and security state changes. Tap ACTIVITY on any account card for full server logs.
         </Text>
 
         {auditLogs.length > 0 ? (
@@ -1437,6 +1606,14 @@ export default function AuthenticatorScreen() {
             <Text style={styles.lockSubtitle}>
               Authentication required to access enterprise TOTP passcodes and verification tools.
             </Text>
+
+            {pendingChallenge && (
+              <View style={styles.lockChallengeNotice}>
+                <Text style={styles.lockChallengeNoticeText}>
+                  INCOMING SIGN-IN REQUEST FOR {pendingChallenge.email.toUpperCase()} — UNLOCK VAULT TO RESPOND
+                </Text>
+              </View>
+            )}
 
             {hasBiometricHardware && biometricEnrolled && (
               <TouchableOpacity style={styles.primaryUnlockButton} onPress={handleUnlockApp}>
@@ -1627,13 +1804,13 @@ export default function AuthenticatorScreen() {
         </Modal>
       )}
 
-      {/* In-App Push Authorization Modal (Mounted only when active) */}
-      {pendingChallenge !== null && (
+      {/* In-App Push Authorization Modal (Gate-aware: waits for vault unlock; Back minimizes instead of denying) */}
+      {isVaultUnlocked && pendingChallenge !== null && !isChallengeMinimized && (
         <Modal
           visible={true}
           animationType="fade"
           transparent={true}
-          onRequestClose={() => handleRespondChallenge("DENY")}
+          onRequestClose={() => setIsChallengeMinimized(true)}
         >
           <View style={styles.pushModalOverlay}>
             <View style={styles.pushModalCard}>
@@ -1742,7 +1919,7 @@ export default function AuthenticatorScreen() {
               </View>
 
               <Text style={styles.deleteWarningNotice}>
-                Are you sure you want to remove this account? This will permanently delete the TOTP secret key from your vault. You will no longer be able to generate authentication codes for this account.
+                Are you sure you want to unbind this device from {accountToDelete.name}? This removes the TOTP secret from this phone and revokes this device's push binding on Sentinel. Your account MFA remains active via other paired devices, TOTP, or emergency recovery codes.
               </Text>
 
               <View style={styles.deleteModalActionsRow}>
@@ -1759,9 +1936,63 @@ export default function AuthenticatorScreen() {
                   onPress={() => executeDeleteAccount(accountToDelete)}
                   activeOpacity={0.8}
                 >
-                  <Text style={styles.deleteModalConfirmText}>REMOVE KEY</Text>
+                  <Text style={styles.deleteModalConfirmText}>UNBIND DEVICE</Text>
                 </TouchableOpacity>
               </View>
+            </View>
+          </View>
+        </Modal>
+      )}
+
+      {/* Server-Synced Per-Account Security Activity Modal */}
+      {activityAccount !== null && (
+        <Modal
+          visible={true}
+          animationType="slide"
+          transparent={true}
+          onRequestClose={() => setActivityAccount(null)}
+        >
+          <View style={styles.deleteModalOverlay}>
+            <View style={styles.activityModalCard}>
+              <View style={styles.auditHeaderRow}>
+                <Text style={styles.securitySectionTitle}>ACCOUNT SECURITY ACTIVITY</Text>
+                <TouchableOpacity onPress={() => setActivityAccount(null)}>
+                  <Text style={styles.scannerCloseButtonText}>CLOSE</Text>
+                </TouchableOpacity>
+              </View>
+              <Text style={styles.activityAccountLabel}>{activityAccount.name}</Text>
+
+              {loadingActivity ? (
+                <Text style={styles.emptyAuditText}>Syncing server audit trail...</Text>
+              ) : activityError ? (
+                <View style={styles.validationErrorBox}>
+                  <Text style={styles.validationErrorText}>{activityError}</Text>
+                </View>
+              ) : serverActivityLogs.length === 0 ? (
+                <Text style={styles.emptyAuditText}>No server activity recorded for this account.</Text>
+              ) : (
+                <ScrollView style={styles.activityScrollList} showsVerticalScrollIndicator={false}>
+                  {serverActivityLogs.map((item) => (
+                    <View key={item.id} style={styles.auditItem}>
+                      <View style={styles.auditTopRow}>
+                        <View style={styles.auditTypeBadge}>
+                          <Text style={styles.auditTypeBadgeText}>
+                            {item.actionType.replace(/_/g, " ")}
+                          </Text>
+                        </View>
+                        <Text style={styles.auditTimeText}>{item.createdAt}</Text>
+                      </View>
+                      <Text style={styles.auditItemDetails}>{item.details}</Text>
+                      {item.targetResource ? (
+                        <Text style={styles.auditItemOrigin}>TARGET: {item.targetResource}</Text>
+                      ) : null}
+                      {item.ipAddress ? (
+                        <Text style={styles.auditItemAccount}>IP: {item.ipAddress}</Text>
+                      ) : null}
+                    </View>
+                  ))}
+                </ScrollView>
+              )}
             </View>
           </View>
         </Modal>
@@ -3416,5 +3647,106 @@ const styles = StyleSheet.create({
     fontWeight: "800",
     color: "#ffffff",
     letterSpacing: 0.8,
+  },
+  driftWarningBanner: {
+    backgroundColor: "rgba(245, 158, 11, 0.14)",
+    borderWidth: 1,
+    borderColor: "rgba(245, 158, 11, 0.4)",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 10,
+  },
+  driftWarningText: {
+    fontSize: 10,
+    fontWeight: "700",
+    color: "#fbbf24",
+    lineHeight: 14,
+  },
+  minimizedChallengeBanner: {
+    backgroundColor: "rgba(84, 244, 252, 0.14)",
+    borderWidth: 1,
+    borderColor: "#54f4fc",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 10,
+  },
+  minimizedChallengeText: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#54f4fc",
+    textAlign: "center",
+    letterSpacing: 0.6,
+  },
+  revokedBadge: {
+    backgroundColor: "rgba(244, 63, 94, 0.16)",
+    borderWidth: 1,
+    borderColor: "rgba(244, 63, 94, 0.45)",
+    borderRadius: 4,
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+    marginTop: 4,
+    alignSelf: "flex-start",
+  },
+  revokedBadgeText: {
+    fontSize: 8.5,
+    fontWeight: "800",
+    color: "#fb7185",
+    letterSpacing: 0.5,
+  },
+  cardActionsGroup: {
+    flexDirection: "row",
+    alignItems: "center",
+    gap: 12,
+  },
+  cardActivityBtn: {
+    paddingHorizontal: 6,
+    paddingVertical: 2,
+  },
+  cardActivityBtnText: {
+    fontSize: 9,
+    fontWeight: "700",
+    color: "#54f4fc",
+    letterSpacing: 0.5,
+  },
+  immutableBadgeText: {
+    fontSize: 8.5,
+    fontWeight: "800",
+    color: "#10b981",
+    letterSpacing: 0.8,
+  },
+  lockChallengeNotice: {
+    backgroundColor: "rgba(84, 244, 252, 0.12)",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.4)",
+    borderRadius: 8,
+    padding: 10,
+    marginBottom: 14,
+    width: "100%",
+  },
+  lockChallengeNoticeText: {
+    fontSize: 10,
+    fontWeight: "800",
+    color: "#54f4fc",
+    textAlign: "center",
+    letterSpacing: 0.5,
+  },
+  activityModalCard: {
+    width: "100%",
+    maxWidth: 420,
+    maxHeight: "80%",
+    backgroundColor: "#070c16",
+    borderWidth: 1,
+    borderColor: "rgba(84, 244, 252, 0.35)",
+    borderRadius: 12,
+    padding: 18,
+  },
+  activityAccountLabel: {
+    fontSize: 11,
+    fontWeight: "700",
+    color: "#54f4fc",
+    marginBottom: 12,
+  },
+  activityScrollList: {
+    maxHeight: 380,
   },
 });

@@ -18,6 +18,17 @@ export interface AuthResponse {
   mfaRequired?: boolean;
 }
 
+export interface ServerAuditLogEntry {
+  id: number;
+  actionType: string;
+  category: string;
+  severity: string;
+  targetResource?: string;
+  details: string;
+  ipAddress?: string;
+  createdAt: string;
+}
+
 export async function setupMfa(userId: number): Promise<MfaSetupResponse> {
   const res = await fetch(`${API_BASE_URL}/api/mfa/setup`, {
     method: "POST",
@@ -52,6 +63,72 @@ export async function disableMfa(userId: number): Promise<AuthResponse> {
     body: JSON.stringify({ userId }),
   });
   return res.json();
+}
+
+export async function bindDevice(payload: {
+  email: string;
+  deviceUuid: string;
+  deviceName: string;
+  platform: string;
+  pushToken?: string | null;
+  totpCode: string;
+}): Promise<{ success: boolean; data?: { serverEpochMs?: number; mfaEnabled?: boolean } }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/mfa/devices/bind`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function unbindDevice(payload: {
+  email: string;
+  deviceUuid: string;
+}): Promise<{ success: boolean; message?: string }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 5000);
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/mfa/devices/unbind`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: controller.signal,
+    });
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function fetchAccountActivity(params: {
+  email: string;
+  totpCode: string;
+  deviceUuid: string;
+  limit?: number;
+}): Promise<{ success: boolean; message?: string; data?: ServerAuditLogEntry[] }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 6000);
+  try {
+    const query = new URLSearchParams({
+      email: params.email,
+      totpCode: params.totpCode,
+      deviceUuid: params.deviceUuid,
+      limit: String(params.limit ?? 25),
+    });
+    const res = await fetch(`${API_BASE_URL}/api/mfa/account-activity?${query.toString()}`, {
+      signal: controller.signal,
+    });
+    return await res.json();
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 export async function recordMobileTelemetry(payload: {

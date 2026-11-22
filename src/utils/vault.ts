@@ -8,16 +8,26 @@ export interface TotpAccount {
   secret: string;
   issuer?: string;
   createdAt?: number;
+  status?: "ACTIVE" | "UNLINKED" | "REVOKED";
 }
 
 export interface VaultSettings {
   requireBiometrics: boolean;
 }
 
+export interface PinLockoutState {
+  failedAttempts: number;
+  lockoutUntil: number;
+}
+
 const SECURE_STORE_KEY = "sentinel_vault_accounts";
 const LEGACY_STORAGE_KEY = "@sentinel_totp_accounts";
 const SETTINGS_SECURE_KEY = "sentinel_vault_settings";
 const SETTINGS_LEGACY_KEY = "@sentinel_vault_settings";
+const DEVICE_UUID_KEY = "sentinel_device_uuid";
+const LEGACY_DEVICE_UUID_KEY = "@sentinel_device_uuid";
+const PIN_LOCKOUT_KEY = "sentinel_pin_lockout";
+const AUDIT_LOGS_SECURE_KEY = "sentinel_audit_logs";
 
 function getSecureStoreWriteOptions(): SecureStore.SecureStoreOptions {
   if (Platform.OS === "ios") {
@@ -40,6 +50,35 @@ export async function isHardwareVaultAvailable(): Promise<boolean> {
 }
 
 /**
+ * Generates or retrieves a persistent, hardware-bound device UUID for this app installation.
+ */
+export async function getOrCreateDeviceUuid(): Promise<string> {
+  try {
+    const isSecure = await isHardwareVaultAvailable();
+    if (isSecure) {
+      const existing = await SecureStore.getItemAsync(DEVICE_UUID_KEY);
+      if (existing) return existing;
+      const legacy = await AsyncStorage.getItem(LEGACY_DEVICE_UUID_KEY);
+      if (legacy) {
+        await SecureStore.setItemAsync(DEVICE_UUID_KEY, legacy, getSecureStoreWriteOptions());
+        await AsyncStorage.removeItem(LEGACY_DEVICE_UUID_KEY);
+        return legacy;
+      }
+      const generated = `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+      await SecureStore.setItemAsync(DEVICE_UUID_KEY, generated, getSecureStoreWriteOptions());
+      return generated;
+    }
+    const existingWeb = await AsyncStorage.getItem(LEGACY_DEVICE_UUID_KEY);
+    if (existingWeb) return existingWeb;
+    const generated = `dev_${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 10)}`;
+    await AsyncStorage.setItem(LEGACY_DEVICE_UUID_KEY, generated);
+    return generated;
+  } catch {
+    return `dev_fallback_${Math.random().toString(36).slice(2, 10)}`;
+  }
+}
+
+/**
  * Loads enrolled TOTP accounts defensively.
  * Checks hardware KeyStore first, then migrates any legacy unencrypted AsyncStorage
  * entries into the secure enclave on first launch.
@@ -57,24 +96,20 @@ export async function loadAccountsFromVault(): Promise<TotpAccount[]> {
         }
       }
 
-      // Check for legacy unencrypted accounts to migrate
       const legacyData = await AsyncStorage.getItem(LEGACY_STORAGE_KEY);
       if (legacyData) {
         const parsedLegacy = JSON.parse(legacyData);
         if (Array.isArray(parsedLegacy) && parsedLegacy.length > 0) {
-          // Encrypt and store into Android KeyStore
           await SecureStore.setItemAsync(
             SECURE_STORE_KEY,
             JSON.stringify(parsedLegacy),
             getSecureStoreWriteOptions()
           );
-          // Delete legacy unencrypted copy to prevent storage leakage
           await AsyncStorage.removeItem(LEGACY_STORAGE_KEY);
           return parsedLegacy;
         }
       }
     } else {
-      // Fallback for Web/simulator without KeyStore
       const fallbackData = await AsyncStorage.getItem(LEGACY_STORAGE_KEY);
       if (fallbackData) {
         const parsed = JSON.parse(fallbackData);
@@ -104,7 +139,6 @@ export async function saveAccountsToVault(accounts: TotpAccount[]): Promise<bool
       return true;
     }
   } catch {
-    // Secondary fallback
     try {
       await AsyncStorage.setItem(LEGACY_STORAGE_KEY, JSON.stringify(accounts));
       return true;
@@ -114,9 +148,6 @@ export async function saveAccountsToVault(accounts: TotpAccount[]): Promise<bool
   }
 }
 
-/**
- * Loads vault security configuration settings.
- */
 export async function loadVaultSettings(): Promise<VaultSettings> {
   const defaultSettings: VaultSettings = { requireBiometrics: true };
   try {
@@ -136,9 +167,6 @@ export async function loadVaultSettings(): Promise<VaultSettings> {
   return defaultSettings;
 }
 
-/**
- * Saves vault security configuration settings.
- */
 export async function saveVaultSettings(settings: VaultSettings): Promise<boolean> {
   try {
     const serialized = JSON.stringify(settings);
@@ -168,6 +196,7 @@ export interface AuditLogEntry {
     | "LOGIN_DENIED"
     | "ACCOUNT_PAIRED"
     | "ACCOUNT_DELETED"
+    | "DEVICE_UNBOUND"
     | "VAULT_UNLOCKED"
     | "VAULT_LOCKED"
     | "PIN_CONFIGURED";
@@ -183,6 +212,27 @@ const LEGACY_MASTER_PIN_KEY = "@sentinel_master_pin";
 
 export async function loadAuditLogs(): Promise<AuditLogEntry[]> {
   try {
+    const isSecure = await isHardwareVaultAvailable();
+    if (isSecure) {
+      const secureRaw = await SecureStore.getItemAsync(AUDIT_LOGS_SECURE_KEY);
+      if (secureRaw) {
+        const parsed = JSON.parse(secureRaw);
+        if (Array.isArray(parsed)) return parsed;
+      }
+      const legacyRaw = await AsyncStorage.getItem(AUDIT_LOGS_KEY);
+      if (legacyRaw) {
+        const parsed = JSON.parse(legacyRaw);
+        if (Array.isArray(parsed)) {
+          await SecureStore.setItemAsync(
+            AUDIT_LOGS_SECURE_KEY,
+            JSON.stringify(parsed.slice(0, 40)),
+            getSecureStoreWriteOptions()
+          ).catch(() => {});
+          await AsyncStorage.removeItem(AUDIT_LOGS_KEY).catch(() => {});
+          return parsed;
+        }
+      }
+    }
     const raw = await AsyncStorage.getItem(AUDIT_LOGS_KEY);
     if (raw) {
       const parsed = JSON.parse(raw);
@@ -203,19 +253,45 @@ export async function recordAuditLog(
 
   try {
     const existing = await loadAuditLogs();
-    const updated = [newLog, ...existing].slice(0, 60);
-    await AsyncStorage.setItem(AUDIT_LOGS_KEY, JSON.stringify(updated));
+    const updated = [newLog, ...existing].slice(0, 40);
+    const serialized = JSON.stringify(updated);
+    const isSecure = await isHardwareVaultAvailable();
+    if (isSecure) {
+      await SecureStore.setItemAsync(AUDIT_LOGS_SECURE_KEY, serialized, getSecureStoreWriteOptions());
+    } else {
+      await AsyncStorage.setItem(AUDIT_LOGS_KEY, serialized);
+    }
   } catch {}
   return newLog;
 }
 
-export async function clearAuditLogs(): Promise<boolean> {
-  try {
-    await AsyncStorage.removeItem(AUDIT_LOGS_KEY);
-    return true;
-  } catch {
-    return false;
+/**
+ * Deterministic salted hash for on-device PIN verification (no plaintext PIN storage).
+ */
+export function hashPinWithSalt(pin: string, salt: string): string {
+  const input = `${salt}:${pin}:sentinel_pin_v1`;
+  let h1 = 0x811c9dc5;
+  let h2 = 0x9e3779b9;
+  for (let round = 0; round < 1000; round++) {
+    for (let i = 0; i < input.length; i++) {
+      const ch = input.charCodeAt(i);
+      h1 ^= ch ^ (round & 0xff);
+      h1 = Math.imul(h1, 0x01000193);
+      h2 ^= (ch << 3) ^ round;
+      h2 = Math.imul(h2, 0x85ebca6b);
+    }
   }
+  return `v1$${salt}$${(h1 >>> 0).toString(16).padStart(8, "0")}${(h2 >>> 0).toString(16).padStart(8, "0")}`;
+}
+
+export function verifyHashedPin(enteredPin: string, storedValue: string): boolean {
+  if (!storedValue.startsWith("v1$")) {
+    return enteredPin === storedValue;
+  }
+  const parts = storedValue.split("$");
+  if (parts.length !== 4) return false;
+  const salt = parts[1];
+  return hashPinWithSalt(enteredPin, salt) === storedValue;
 }
 
 export async function loadMasterPin(): Promise<string | null> {
@@ -238,17 +314,53 @@ export async function loadMasterPin(): Promise<string | null> {
   }
 }
 
-export async function saveMasterPin(pin: string): Promise<boolean> {
+export async function saveMasterPin(pin: string): Promise<string | null> {
   try {
+    const salt = Math.random().toString(36).slice(2, 10);
+    const hashed = hashPinWithSalt(pin, salt);
     const isSecure = await isHardwareVaultAvailable();
     if (isSecure) {
-      await SecureStore.setItemAsync(MASTER_PIN_KEY, pin, getSecureStoreWriteOptions());
+      await SecureStore.setItemAsync(MASTER_PIN_KEY, hashed, getSecureStoreWriteOptions());
       await AsyncStorage.removeItem(LEGACY_MASTER_PIN_KEY).catch(() => {});
-      return true;
+      return hashed;
     }
-    await AsyncStorage.setItem(LEGACY_MASTER_PIN_KEY, pin);
-    return true;
+    await AsyncStorage.setItem(LEGACY_MASTER_PIN_KEY, hashed);
+    return hashed;
   } catch {
-    return false;
+    return null;
   }
+}
+
+export async function loadPinLockoutState(): Promise<PinLockoutState> {
+  try {
+    const raw = await AsyncStorage.getItem(PIN_LOCKOUT_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw);
+      if (typeof parsed.failedAttempts === "number" && typeof parsed.lockoutUntil === "number") {
+        return parsed;
+      }
+    }
+  } catch {}
+  return { failedAttempts: 0, lockoutUntil: 0 };
+}
+
+export async function recordPinFailure(): Promise<PinLockoutState> {
+  const current = await loadPinLockoutState();
+  const nextAttempts = current.failedAttempts + 1;
+  let cooldownMs = 0;
+  if (nextAttempts >= 10) {
+    cooldownMs = 300_000;
+  } else if (nextAttempts >= 5) {
+    cooldownMs = 30_000;
+  }
+  const nextState: PinLockoutState = {
+    failedAttempts: nextAttempts,
+    lockoutUntil: cooldownMs > 0 ? Date.now() + cooldownMs : 0,
+  };
+  await AsyncStorage.setItem(PIN_LOCKOUT_KEY, JSON.stringify(nextState)).catch(() => {});
+  return nextState;
+}
+
+export async function resetPinFailures(): Promise<void> {
+  await AsyncStorage.removeItem(PIN_LOCKOUT_KEY).catch(() => {});
 }
