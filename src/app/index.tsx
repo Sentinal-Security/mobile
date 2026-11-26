@@ -28,6 +28,7 @@ import * as SplashScreen from "expo-splash-screen";
 import * as Device from "expo-device";
 import * as SecureStore from "expo-secure-store";
 import { DARK_COLORS, LIGHT_COLORS, type ThemeColors } from "../theme/colors";
+import { ImageCaptcha, IMAGE_CAPTCHA_POOL_LENGTH } from "../components/ImageCaptcha";
 import {
   generateTotp,
   getSecondsRemaining,
@@ -156,12 +157,7 @@ export default function AuthenticatorScreen() {
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
   const [mobileCaptchaVerified, setMobileCaptchaVerified] = useState(false);
-  const [captchaChallenge, setCaptchaChallenge] = useState(() => {
-    const a = Math.floor(Math.random() * 9) + 1;
-    const b = Math.floor(Math.random() * 9) + 1;
-    return { a, b, answer: a + b };
-  });
-  const [captchaInput, setCaptchaInput] = useState("");
+  const [captchaIndex, setCaptchaIndex] = useState(0);
   const [themeMode, setThemeMode] = useState<"dark" | "light">("dark");
   const themeColors = themeMode === "light" ? LIGHT_COLORS : DARK_COLORS;
   const styles = useMemo(() => createStyles(themeColors), [themeColors]);
@@ -385,10 +381,7 @@ export default function AuthenticatorScreen() {
   };
 
   const resetMobileCaptcha = () => {
-    const a = Math.floor(Math.random() * 9) + 1;
-    const b = Math.floor(Math.random() * 9) + 1;
-    setCaptchaChallenge({ a, b, answer: a + b });
-    setCaptchaInput("");
+    setCaptchaIndex((prev) => (prev + 1) % IMAGE_CAPTCHA_POOL_LENGTH);
     setMobileCaptchaVerified(false);
   };
 
@@ -2462,43 +2455,19 @@ export default function AuthenticatorScreen() {
                 onChangeText={setLoginPassword}
               />
 
-              {/* Offline-Safe Mobile Captcha */}
-              <View
-                style={{
-                  borderRadius: 10,
-                  borderWidth: 1,
-                  borderColor: mobileCaptchaVerified ? themeColors.successBorder : themeColors.borderSubtle,
-                  backgroundColor: mobileCaptchaVerified ? themeColors.successSoft : themeColors.bgElevated,
-                  padding: 12,
-                  marginBottom: 14,
+              {/* Preset 5-Challenge Image-Selection Captcha */}
+              <ImageCaptcha
+                verified={mobileCaptchaVerified}
+                onVerifyChange={(next) => {
+                  setMobileCaptchaVerified(next);
+                  if (next) setLoginError(null);
                 }}
-              >
-                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: mobileCaptchaVerified ? 0 : 8 }}>
-                  <Text style={{ color: mobileCaptchaVerified ? themeColors.success : themeColors.textPrimary, fontSize: 12, fontWeight: "700" }}>
-                    {mobileCaptchaVerified ? "HUMAN VERIFIED" : `CAPTCHA: ${captchaChallenge.a} + ${captchaChallenge.b} = ?`}
-                  </Text>
-                  <TouchableOpacity onPress={resetMobileCaptcha}>
-                    <Text style={{ color: themeColors.accent, fontSize: 11, fontWeight: "700" }}>NEW</Text>
-                  </TouchableOpacity>
-                </View>
-                {!mobileCaptchaVerified && (
-                  <TextInput
-                    style={[styles.pinInputField, { textAlign: "left", marginBottom: 0 }]}
-                    placeholder="Enter sum to verify"
-                    placeholderTextColor={themeColors.textMuted}
-                    keyboardType="number-pad"
-                    value={captchaInput}
-                    onChangeText={(val) => {
-                      const clean = val.replace(/\D/g, "").slice(0, 3);
-                      setCaptchaInput(clean);
-                      if (clean && Number(clean) === captchaChallenge.answer) {
-                        setMobileCaptchaVerified(true);
-                        setLoginError(null);
-                      }
-                    }}
-                  />
-                )}
-              </View>
+                challengeIndex={captchaIndex}
+                onCycleChallenge={() =>
+                  setCaptchaIndex((prev) => (prev + 1) % IMAGE_CAPTCHA_POOL_LENGTH)
+                }
+                themeColors={themeColors}
+              />
 
               <TouchableOpacity
                 disabled={loginLoading}
