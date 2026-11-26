@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import { Image, ImageSourcePropType, Text, TouchableOpacity, View } from "react-native";
 
 export type TileCategory =
@@ -7,133 +7,32 @@ export type TileCategory =
   | "bus"
   | "car"
   | "crosswalk"
+  | "hydrant"
+  | "bridge"
+  | "motorcycle"
   | "tree"
   | "building";
 
-type TilePhotoId =
-  | "traffic_light_1"
-  | "traffic_light_2"
-  | "traffic_light_3"
-  | "bicycle_1"
-  | "bicycle_2"
-  | "bicycle_3"
-  | "bus_1"
-  | "bus_2"
-  | "bus_3"
-  | "bus_4"
-  | "car_1"
-  | "car_2"
-  | "car_3"
-  | "crosswalk_1"
-  | "crosswalk_2"
-  | "crosswalk_3"
-  | "tree_1"
-  | "tree_2"
-  | "building_1"
-  | "building_2";
-
 interface CaptchaTile {
-  photo: TilePhotoId;
+  photo: keyof typeof TILE_IMAGES;
   category: TileCategory;
 }
 
 interface ImageChallenge {
-  id: string;
   target: TileCategory;
   label: string;
   tiles: CaptchaTile[];
 }
 
-const CHALLENGE_POOL: ImageChallenge[] = [
-  {
-    id: "preset-traffic-lights",
-    target: "traffic_light",
-    label: "traffic lights",
-    tiles: [
-      { photo: "traffic_light_1", category: "traffic_light" },
-      { photo: "car_1", category: "car" },
-      { photo: "building_1", category: "building" },
-      { photo: "bus_1", category: "bus" },
-      { photo: "traffic_light_2", category: "traffic_light" },
-      { photo: "tree_1", category: "tree" },
-      { photo: "traffic_light_3", category: "traffic_light" },
-      { photo: "bicycle_1", category: "bicycle" },
-      { photo: "crosswalk_1", category: "crosswalk" },
-    ],
-  },
-  {
-    id: "preset-bicycles",
-    target: "bicycle",
-    label: "bicycles",
-    tiles: [
-      { photo: "car_2", category: "car" },
-      { photo: "bicycle_1", category: "bicycle" },
-      { photo: "tree_2", category: "tree" },
-      { photo: "bicycle_2", category: "bicycle" },
-      { photo: "bus_2", category: "bus" },
-      { photo: "traffic_light_1", category: "traffic_light" },
-      { photo: "crosswalk_2", category: "crosswalk" },
-      { photo: "bicycle_3", category: "bicycle" },
-      { photo: "building_2", category: "building" },
-    ],
-  },
-  {
-    id: "preset-buses",
-    target: "bus",
-    label: "buses",
-    tiles: [
-      { photo: "bus_1", category: "bus" },
-      { photo: "tree_1", category: "tree" },
-      { photo: "car_3", category: "car" },
-      { photo: "traffic_light_2", category: "traffic_light" },
-      { photo: "bus_2", category: "bus" },
-      { photo: "bicycle_2", category: "bicycle" },
-      { photo: "building_1", category: "building" },
-      { photo: "bus_3", category: "bus" },
-      { photo: "bus_4", category: "bus" },
-    ],
-  },
-  {
-    id: "preset-cars",
-    target: "car",
-    label: "cars",
-    tiles: [
-      { photo: "tree_2", category: "tree" },
-      { photo: "car_1", category: "car" },
-      { photo: "bus_3", category: "bus" },
-      { photo: "crosswalk_3", category: "crosswalk" },
-      { photo: "traffic_light_3", category: "traffic_light" },
-      { photo: "car_2", category: "car" },
-      { photo: "car_3", category: "car" },
-      { photo: "building_2", category: "building" },
-      { photo: "bicycle_3", category: "bicycle" },
-    ],
-  },
-  {
-    id: "preset-crosswalks",
-    target: "crosswalk",
-    label: "crosswalks",
-    tiles: [
-      { photo: "crosswalk_1", category: "crosswalk" },
-      { photo: "bicycle_1", category: "bicycle" },
-      { photo: "car_1", category: "car" },
-      { photo: "building_1", category: "building" },
-      { photo: "crosswalk_2", category: "crosswalk" },
-      { photo: "bus_4", category: "bus" },
-      { photo: "tree_1", category: "tree" },
-      { photo: "traffic_light_1", category: "traffic_light" },
-      { photo: "crosswalk_3", category: "crosswalk" },
-    ],
-  },
-];
-
-const TILE_IMAGES: Record<TilePhotoId, ImageSourcePropType> = {
+const TILE_IMAGES = {
   traffic_light_1: require("../../assets/captcha/traffic_light_1.jpg"),
   traffic_light_2: require("../../assets/captcha/traffic_light_2.jpg"),
   traffic_light_3: require("../../assets/captcha/traffic_light_3.jpg"),
+  traffic_light_4: require("../../assets/captcha/traffic_light_4.jpg"),
   bicycle_1: require("../../assets/captcha/bicycle_1.jpg"),
   bicycle_2: require("../../assets/captcha/bicycle_2.jpg"),
   bicycle_3: require("../../assets/captcha/bicycle_3.jpg"),
+  bicycle_4: require("../../assets/captcha/bicycle_4.jpg"),
   bus_1: require("../../assets/captcha/bus_1.jpg"),
   bus_2: require("../../assets/captcha/bus_2.jpg"),
   bus_3: require("../../assets/captcha/bus_3.jpg"),
@@ -141,14 +40,126 @@ const TILE_IMAGES: Record<TilePhotoId, ImageSourcePropType> = {
   car_1: require("../../assets/captcha/car_1.jpg"),
   car_2: require("../../assets/captcha/car_2.jpg"),
   car_3: require("../../assets/captcha/car_3.jpg"),
+  car_4: require("../../assets/captcha/car_4.jpg"),
   crosswalk_1: require("../../assets/captcha/crosswalk_1.jpg"),
   crosswalk_2: require("../../assets/captcha/crosswalk_2.jpg"),
   crosswalk_3: require("../../assets/captcha/crosswalk_3.jpg"),
+  crosswalk_4: require("../../assets/captcha/crosswalk_4.jpg"),
+  hydrant_1: require("../../assets/captcha/hydrant_1.jpg"),
+  hydrant_2: require("../../assets/captcha/hydrant_2.jpg"),
+  hydrant_3: require("../../assets/captcha/hydrant_3.jpg"),
+  hydrant_4: require("../../assets/captcha/hydrant_4.jpg"),
+  bridge_1: require("../../assets/captcha/bridge_1.jpg"),
+  bridge_2: require("../../assets/captcha/bridge_2.jpg"),
+  bridge_3: require("../../assets/captcha/bridge_3.jpg"),
+  bridge_4: require("../../assets/captcha/bridge_4.jpg"),
+  motorcycle_1: require("../../assets/captcha/motorcycle_1.jpg"),
+  motorcycle_2: require("../../assets/captcha/motorcycle_2.jpg"),
+  motorcycle_3: require("../../assets/captcha/motorcycle_3.jpg"),
+  motorcycle_4: require("../../assets/captcha/motorcycle_4.jpg"),
   tree_1: require("../../assets/captcha/tree_1.jpg"),
   tree_2: require("../../assets/captcha/tree_2.jpg"),
+  tree_3: require("../../assets/captcha/tree_3.jpg"),
+  tree_4: require("../../assets/captcha/tree_4.jpg"),
   building_1: require("../../assets/captcha/building_1.jpg"),
   building_2: require("../../assets/captcha/building_2.jpg"),
+  building_3: require("../../assets/captcha/building_3.jpg"),
+  building_4: require("../../assets/captcha/building_4.jpg"),
+} satisfies Record<string, ImageSourcePropType>;
+
+type PhotoKey = keyof typeof TILE_IMAGES;
+
+const CATEGORY_CATALOG: Record<TileCategory, { label: string; photos: PhotoKey[] }> = {
+  traffic_light: {
+    label: "traffic lights",
+    photos: ["traffic_light_1", "traffic_light_2", "traffic_light_3", "traffic_light_4"],
+  },
+  bicycle: {
+    label: "bicycles",
+    photos: ["bicycle_1", "bicycle_2", "bicycle_3", "bicycle_4"],
+  },
+  bus: {
+    label: "buses",
+    photos: ["bus_1", "bus_2", "bus_3", "bus_4"],
+  },
+  car: {
+    label: "cars",
+    photos: ["car_1", "car_2", "car_3", "car_4"],
+  },
+  crosswalk: {
+    label: "crosswalks",
+    photos: ["crosswalk_1", "crosswalk_2", "crosswalk_3", "crosswalk_4"],
+  },
+  hydrant: {
+    label: "fire hydrants",
+    photos: ["hydrant_1", "hydrant_2", "hydrant_3", "hydrant_4"],
+  },
+  bridge: {
+    label: "bridges",
+    photos: ["bridge_1", "bridge_2", "bridge_3", "bridge_4"],
+  },
+  motorcycle: {
+    label: "motorcycles",
+    photos: ["motorcycle_1", "motorcycle_2", "motorcycle_3", "motorcycle_4"],
+  },
+  tree: {
+    label: "trees",
+    photos: ["tree_1", "tree_2", "tree_3", "tree_4"],
+  },
+  building: {
+    label: "buildings",
+    photos: ["building_1", "building_2", "building_3", "building_4"],
+  },
 };
+
+const TARGET_CATEGORIES: TileCategory[] = [
+  "traffic_light",
+  "bicycle",
+  "bus",
+  "car",
+  "crosswalk",
+  "hydrant",
+  "bridge",
+  "motorcycle",
+];
+
+function shuffleArray<T>(items: T[]): T[] {
+  const arr = [...items];
+  for (let i = arr.length - 1; i > 0; i--) {
+    const j = Math.floor(Math.random() * (i + 1));
+    [arr[i], arr[j]] = [arr[j], arr[i]];
+  }
+  return arr;
+}
+
+function generateDynamicChallenge(excludeTarget?: TileCategory): ImageChallenge {
+  const candidates = excludeTarget
+    ? TARGET_CATEGORIES.filter((c) => c !== excludeTarget)
+    : TARGET_CATEGORIES;
+  const target = candidates[Math.floor(Math.random() * candidates.length)];
+
+  const targetCount = Math.random() < 0.5 ? 3 : 4;
+  const targetPhotos = shuffleArray(CATEGORY_CATALOG[target].photos)
+    .slice(0, targetCount)
+    .map((photo) => ({ photo, category: target }));
+
+  const distractorPool: CaptchaTile[] = [];
+  for (const [cat, info] of Object.entries(CATEGORY_CATALOG) as [TileCategory, { label: string; photos: PhotoKey[] }][]) {
+    if (cat === target) continue;
+    for (const photo of info.photos) {
+      distractorPool.push({ photo, category: cat });
+    }
+  }
+
+  const distractors = shuffleArray(distractorPool).slice(0, 9 - targetCount);
+  const tiles = shuffleArray([...targetPhotos, ...distractors]);
+
+  return {
+    target,
+    label: CATEGORY_CATALOG[target].label,
+    tiles,
+  };
+}
 
 interface ThemeColorsLike {
   bgElevated: string;
@@ -172,7 +183,7 @@ interface ImageCaptchaProps {
   themeColors: ThemeColorsLike;
 }
 
-export const IMAGE_CAPTCHA_POOL_LENGTH = CHALLENGE_POOL.length;
+export const IMAGE_CAPTCHA_POOL_LENGTH = TARGET_CATEGORIES.length;
 
 export function ImageCaptcha({
   verified,
@@ -181,11 +192,15 @@ export function ImageCaptcha({
   onCycleChallenge,
   themeColors,
 }: ImageCaptchaProps) {
+  const [challenge, setChallenge] = useState<ImageChallenge>(() => generateDynamicChallenge());
   const [selectedIndices, setSelectedIndices] = useState<number[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  const safeIndex = ((challengeIndex % CHALLENGE_POOL.length) + CHALLENGE_POOL.length) % CHALLENGE_POOL.length;
-  const challenge = CHALLENGE_POOL[safeIndex];
+  useEffect(() => {
+    setChallenge((prev) => generateDynamicChallenge(prev.target));
+    setSelectedIndices([]);
+    setErrorMsg(null);
+  }, [challengeIndex]);
 
   const isExactMatch = (indices: number[]) => {
     const expected = challenge.tiles
@@ -225,7 +240,7 @@ export function ImageCaptcha({
       setSelectedIndices([]);
       onVerifyChange(false);
       onCycleChallenge();
-      setErrorMsg("Selection did not match. Try the next challenge.");
+      setErrorMsg("Selection did not match. Try the new challenge.");
     }
   };
 
@@ -257,7 +272,7 @@ export function ImageCaptcha({
         >
           {verified
             ? "HUMAN VERIFIED"
-            : `SELECT ALL: ${challenge.label.toUpperCase()} (${safeIndex + 1}/${CHALLENGE_POOL.length})`}
+            : `SELECT ALL: ${challenge.label.toUpperCase()}`}
         </Text>
         <TouchableOpacity onPress={handleCycle}>
           <Text style={{ color: themeColors.accent, fontSize: 11, fontWeight: "700" }}>
@@ -273,7 +288,7 @@ export function ImageCaptcha({
               const isSelected = selectedIndices.includes(idx);
               return (
                 <TouchableOpacity
-                  key={`${challenge.id}-${idx}`}
+                  key={`${challenge.target}-${tile.photo}-${idx}`}
                   onPress={() => toggleTile(idx)}
                   style={{
                     width: "31.5%",
