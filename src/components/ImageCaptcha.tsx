@@ -1,7 +1,7 @@
 import React, { useState } from "react";
 import { Image, ImageSourcePropType, Text, TouchableOpacity, View } from "react-native";
 
-export type CaptchaTileKind =
+export type TileCategory =
   | "traffic_light"
   | "bicycle"
   | "bus"
@@ -10,11 +10,38 @@ export type CaptchaTileKind =
   | "tree"
   | "building";
 
+type TilePhotoId =
+  | "traffic_light_1"
+  | "traffic_light_2"
+  | "traffic_light_3"
+  | "bicycle_1"
+  | "bicycle_2"
+  | "bicycle_3"
+  | "bus_1"
+  | "bus_2"
+  | "bus_3"
+  | "bus_4"
+  | "car_1"
+  | "car_2"
+  | "car_3"
+  | "crosswalk_1"
+  | "crosswalk_2"
+  | "crosswalk_3"
+  | "tree_1"
+  | "tree_2"
+  | "building_1"
+  | "building_2";
+
+interface CaptchaTile {
+  photo: TilePhotoId;
+  category: TileCategory;
+}
+
 interface ImageChallenge {
   id: string;
-  target: CaptchaTileKind;
+  target: TileCategory;
   label: string;
-  tiles: CaptchaTileKind[];
+  tiles: CaptchaTile[];
 }
 
 const CHALLENGE_POOL: ImageChallenge[] = [
@@ -23,15 +50,15 @@ const CHALLENGE_POOL: ImageChallenge[] = [
     target: "traffic_light",
     label: "traffic lights",
     tiles: [
-      "traffic_light",
-      "car",
-      "building",
-      "bus",
-      "traffic_light",
-      "tree",
-      "traffic_light",
-      "bicycle",
-      "crosswalk",
+      { photo: "traffic_light_1", category: "traffic_light" },
+      { photo: "car_1", category: "car" },
+      { photo: "building_1", category: "building" },
+      { photo: "bus_1", category: "bus" },
+      { photo: "traffic_light_2", category: "traffic_light" },
+      { photo: "tree_1", category: "tree" },
+      { photo: "traffic_light_3", category: "traffic_light" },
+      { photo: "bicycle_1", category: "bicycle" },
+      { photo: "crosswalk_1", category: "crosswalk" },
     ],
   },
   {
@@ -39,15 +66,15 @@ const CHALLENGE_POOL: ImageChallenge[] = [
     target: "bicycle",
     label: "bicycles",
     tiles: [
-      "car",
-      "bicycle",
-      "tree",
-      "bicycle",
-      "bus",
-      "traffic_light",
-      "crosswalk",
-      "bicycle",
-      "building",
+      { photo: "car_2", category: "car" },
+      { photo: "bicycle_1", category: "bicycle" },
+      { photo: "tree_2", category: "tree" },
+      { photo: "bicycle_2", category: "bicycle" },
+      { photo: "bus_2", category: "bus" },
+      { photo: "traffic_light_1", category: "traffic_light" },
+      { photo: "crosswalk_2", category: "crosswalk" },
+      { photo: "bicycle_3", category: "bicycle" },
+      { photo: "building_2", category: "building" },
     ],
   },
   {
@@ -55,15 +82,15 @@ const CHALLENGE_POOL: ImageChallenge[] = [
     target: "bus",
     label: "buses",
     tiles: [
-      "bus",
-      "tree",
-      "car",
-      "traffic_light",
-      "bus",
-      "bicycle",
-      "building",
-      "bus",
-      "bus",
+      { photo: "bus_1", category: "bus" },
+      { photo: "tree_1", category: "tree" },
+      { photo: "car_3", category: "car" },
+      { photo: "traffic_light_2", category: "traffic_light" },
+      { photo: "bus_2", category: "bus" },
+      { photo: "bicycle_2", category: "bicycle" },
+      { photo: "building_1", category: "building" },
+      { photo: "bus_3", category: "bus" },
+      { photo: "bus_4", category: "bus" },
     ],
   },
   {
@@ -71,15 +98,15 @@ const CHALLENGE_POOL: ImageChallenge[] = [
     target: "car",
     label: "cars",
     tiles: [
-      "tree",
-      "car",
-      "bus",
-      "crosswalk",
-      "traffic_light",
-      "car",
-      "car",
-      "building",
-      "bicycle",
+      { photo: "tree_2", category: "tree" },
+      { photo: "car_1", category: "car" },
+      { photo: "bus_3", category: "bus" },
+      { photo: "crosswalk_3", category: "crosswalk" },
+      { photo: "traffic_light_3", category: "traffic_light" },
+      { photo: "car_2", category: "car" },
+      { photo: "car_3", category: "car" },
+      { photo: "building_2", category: "building" },
+      { photo: "bicycle_3", category: "bicycle" },
     ],
   },
   {
@@ -87,27 +114,40 @@ const CHALLENGE_POOL: ImageChallenge[] = [
     target: "crosswalk",
     label: "crosswalks",
     tiles: [
-      "crosswalk",
-      "bicycle",
-      "car",
-      "building",
-      "crosswalk",
-      "bus",
-      "tree",
-      "traffic_light",
-      "crosswalk",
+      { photo: "crosswalk_1", category: "crosswalk" },
+      { photo: "bicycle_1", category: "bicycle" },
+      { photo: "car_1", category: "car" },
+      { photo: "building_1", category: "building" },
+      { photo: "crosswalk_2", category: "crosswalk" },
+      { photo: "bus_4", category: "bus" },
+      { photo: "tree_1", category: "tree" },
+      { photo: "traffic_light_1", category: "traffic_light" },
+      { photo: "crosswalk_3", category: "crosswalk" },
     ],
   },
 ];
 
-const TILE_IMAGES: Record<CaptchaTileKind, ImageSourcePropType> = {
-  traffic_light: require("../../assets/captcha/traffic_light.jpg"),
-  bicycle: require("../../assets/captcha/bicycle.jpg"),
-  bus: require("../../assets/captcha/bus.jpg"),
-  car: require("../../assets/captcha/car.jpg"),
-  crosswalk: require("../../assets/captcha/crosswalk.jpg"),
-  tree: require("../../assets/captcha/tree.jpg"),
-  building: require("../../assets/captcha/building.jpg"),
+const TILE_IMAGES: Record<TilePhotoId, ImageSourcePropType> = {
+  traffic_light_1: require("../../assets/captcha/traffic_light_1.jpg"),
+  traffic_light_2: require("../../assets/captcha/traffic_light_2.jpg"),
+  traffic_light_3: require("../../assets/captcha/traffic_light_3.jpg"),
+  bicycle_1: require("../../assets/captcha/bicycle_1.jpg"),
+  bicycle_2: require("../../assets/captcha/bicycle_2.jpg"),
+  bicycle_3: require("../../assets/captcha/bicycle_3.jpg"),
+  bus_1: require("../../assets/captcha/bus_1.jpg"),
+  bus_2: require("../../assets/captcha/bus_2.jpg"),
+  bus_3: require("../../assets/captcha/bus_3.jpg"),
+  bus_4: require("../../assets/captcha/bus_4.jpg"),
+  car_1: require("../../assets/captcha/car_1.jpg"),
+  car_2: require("../../assets/captcha/car_2.jpg"),
+  car_3: require("../../assets/captcha/car_3.jpg"),
+  crosswalk_1: require("../../assets/captcha/crosswalk_1.jpg"),
+  crosswalk_2: require("../../assets/captcha/crosswalk_2.jpg"),
+  crosswalk_3: require("../../assets/captcha/crosswalk_3.jpg"),
+  tree_1: require("../../assets/captcha/tree_1.jpg"),
+  tree_2: require("../../assets/captcha/tree_2.jpg"),
+  building_1: require("../../assets/captcha/building_1.jpg"),
+  building_2: require("../../assets/captcha/building_2.jpg"),
 };
 
 interface ThemeColorsLike {
@@ -149,7 +189,7 @@ export function ImageCaptcha({
 
   const isExactMatch = (indices: number[]) => {
     const expected = challenge.tiles
-      .map((tile, idx) => (tile === challenge.target ? idx : -1))
+      .map((tile, idx) => (tile.category === challenge.target ? idx : -1))
       .filter((idx) => idx !== -1);
     const sorted = [...indices].sort((a, b) => a - b);
     return (
@@ -237,7 +277,7 @@ export function ImageCaptcha({
                   onPress={() => toggleTile(idx)}
                   style={{
                     width: "31.5%",
-                    height: 68,
+                    aspectRatio: 1,
                     borderRadius: 8,
                     borderWidth: isSelected ? 2 : 1,
                     borderColor: isSelected ? themeColors.accent : themeColors.borderSubtle,
@@ -247,7 +287,7 @@ export function ImageCaptcha({
                   }}
                 >
                   <Image
-                    source={TILE_IMAGES[tile]}
+                    source={TILE_IMAGES[tile.photo]}
                     style={{
                       width: "100%",
                       height: "100%",
