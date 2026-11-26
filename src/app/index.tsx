@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from "react";
+import React, { useState, useEffect, useRef, useMemo } from "react";
 import {
   View,
   Text,
@@ -27,6 +27,7 @@ import * as LocalAuthentication from "expo-local-authentication";
 import * as SplashScreen from "expo-splash-screen";
 import * as Device from "expo-device";
 import * as SecureStore from "expo-secure-store";
+import { DARK_COLORS, LIGHT_COLORS, type ThemeColors } from "../theme/colors";
 import {
   generateTotp,
   getSecondsRemaining,
@@ -154,6 +155,16 @@ export default function AuthenticatorScreen() {
   const [loginPassword, setLoginPassword] = useState("");
   const [loginLoading, setLoginLoading] = useState(false);
   const [loginError, setLoginError] = useState<string | null>(null);
+  const [mobileCaptchaVerified, setMobileCaptchaVerified] = useState(false);
+  const [captchaChallenge, setCaptchaChallenge] = useState(() => {
+    const a = Math.floor(Math.random() * 9) + 1;
+    const b = Math.floor(Math.random() * 9) + 1;
+    return { a, b, answer: a + b };
+  });
+  const [captchaInput, setCaptchaInput] = useState("");
+  const [themeMode, setThemeMode] = useState<"dark" | "light">("dark");
+  const themeColors = themeMode === "light" ? LIGHT_COLORS : DARK_COLORS;
+  const styles = useMemo(() => createStyles(themeColors), [themeColors]);
   const [personalLogs, setPersonalLogs] = useState<ServerAuditLogEntry[]>([]);
   const [personalLogsLoading, setPersonalLogsLoading] = useState(false);
   const [personalLogsError, setPersonalLogsError] = useState<string | null>(null);
@@ -345,12 +356,41 @@ export default function AuthenticatorScreen() {
             setActiveAccountEmail(String(parsed.activeEmail));
           }
         }
+        const savedTheme =
+          Platform.OS === "web"
+            ? window.localStorage.getItem("sentinel_mobile_theme_v1")
+            : await SecureStore.getItemAsync("sentinel_mobile_theme_v1");
+        if (savedTheme === "light" || savedTheme === "dark") {
+          setThemeMode(savedTheme);
+        }
       } catch {
         // Ignore storage read notice
       }
     };
     loadSessions();
   }, []);
+
+  const handleToggleTheme = async () => {
+    const next: "dark" | "light" = themeMode === "dark" ? "light" : "dark";
+    setThemeMode(next);
+    try {
+      if (Platform.OS === "web") {
+        window.localStorage.setItem("sentinel_mobile_theme_v1", next);
+      } else {
+        await SecureStore.setItemAsync("sentinel_mobile_theme_v1", next);
+      }
+    } catch {
+      // Ignore storage write notice
+    }
+  };
+
+  const resetMobileCaptcha = () => {
+    const a = Math.floor(Math.random() * 9) + 1;
+    const b = Math.floor(Math.random() * 9) + 1;
+    setCaptchaChallenge({ a, b, answer: a + b });
+    setCaptchaInput("");
+    setMobileCaptchaVerified(false);
+  };
 
   const persistMobileSessions = async (nextAccounts: MobileSessionUser[], nextActiveEmail: string | null) => {
     try {
@@ -394,6 +434,10 @@ export default function AuthenticatorScreen() {
       setLoginError("Please enter your email and password.");
       return;
     }
+    if (!mobileCaptchaVerified) {
+      setLoginError("Please complete the human verification captcha.");
+      return;
+    }
     setLoginLoading(true);
     setLoginError(null);
     const res = await loginMobileAccount(loginEmail, loginPassword);
@@ -412,10 +456,53 @@ export default function AuthenticatorScreen() {
     setSignedInAccounts(merged);
     setActiveAccountEmail(signedUser.email);
     await persistMobileSessions(merged, signedUser.email);
+
+    // Auto-pair TOTP & bind device for this signed-in account (1 account = 1 tied device)
+    if (signedUser.mfaSecret) {
+      const normalizedEmail = signedUser.email.trim().toLowerCase();
+      setAccounts((prev) => {
+        const exists = prev.some((a) => a.name?.trim().toLowerCase() === normalizedEmail);
+        const nextAccounts: TotpAccount[] = exists
+          ? prev.map((a) =>
+              a.name?.trim().toLowerCase() === normalizedEmail
+                ? { ...a, secret: signedUser.mfaSecret!, status: "ACTIVE" }
+                : a
+            )
+          : [
+              {
+                id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+                name: normalizedEmail,
+                issuer: "Sentinel Security",
+                secret: signedUser.mfaSecret!,
+                status: "ACTIVE",
+              },
+              ...prev,
+            ];
+        saveAccountsToVault(nextAccounts).catch(() => {});
+        return nextAccounts;
+      });
+      if (deviceUuid) {
+        try {
+          const code = generateTotp(signedUser.mfaSecret);
+          bindDevice({
+            email: normalizedEmail,
+            deviceUuid,
+            deviceName: deviceLabel,
+            platform: Platform.OS,
+            pushToken,
+            totpCode: code,
+          }).catch(() => {});
+        } catch {
+          // Ignore TOTP generation notice
+        }
+      }
+    }
+
     setShowAccountLoginModal(false);
     setShowAccountSwitcherModal(false);
     setLoginEmail("");
     setLoginPassword("");
+    resetMobileCaptcha();
   };
 
   const handleSwitchAccount = async (email: string) => {
@@ -1920,6 +2007,15 @@ export default function AuthenticatorScreen() {
 
           <TouchableOpacity
             style={[styles.quickLockIconBtn, { marginRight: 6 }]}
+            onPress={handleToggleTheme}
+          >
+            <Text style={styles.quickLockIconText}>
+              {themeMode === "dark" ? "LIGHT" : "DARK"}
+            </Text>
+          </TouchableOpacity>
+
+          <TouchableOpacity
+            style={[styles.quickLockIconBtn, { marginRight: 6 }]}
             onPress={() => setShowAccountSwitcherModal(true)}
           >
             <Text style={styles.quickLockIconText}>
@@ -2266,8 +2362,8 @@ export default function AuthenticatorScreen() {
                         padding: 12,
                         borderRadius: 10,
                         borderWidth: 1,
-                        borderColor: isActive ? "#54f4fc" : "rgba(255,255,255,0.12)",
-                        backgroundColor: isActive ? "rgba(84,244,252,0.1)" : "#0b1322",
+                        borderColor: isActive ? themeColors.accent : themeColors.borderSubtle,
+                        backgroundColor: isActive ? themeColors.accentSoft : themeColors.bgElevated,
                         marginBottom: 8,
                         flexDirection: "row",
                         alignItems: "center",
@@ -2275,12 +2371,12 @@ export default function AuthenticatorScreen() {
                       }}
                     >
                       <View style={{ flex: 1, paddingRight: 8 }}>
-                        <Text style={{ color: "#ffffff", fontWeight: "700", fontSize: 13 }}>
+                        <Text style={{ color: themeColors.textPrimary, fontWeight: "700", fontSize: 13 }}>
                           {acc.fullName || acc.email}
                         </Text>
-                        <Text style={{ color: "#94a3b8", fontSize: 11 }}>{acc.email}</Text>
+                        <Text style={{ color: themeColors.textMuted, fontSize: 11 }}>{acc.email}</Text>
                       </View>
-                      <Text style={{ color: isActive ? "#54f4fc" : "#64748b", fontSize: 10, fontWeight: "800" }}>
+                      <Text style={{ color: isActive ? themeColors.accent : themeColors.textMuted, fontSize: 10, fontWeight: "800" }}>
                         {isActive ? "ACTIVE" : "SWITCH"}
                       </Text>
                     </TouchableOpacity>
@@ -2358,14 +2454,51 @@ export default function AuthenticatorScreen() {
               />
 
               <TextInput
-                style={[styles.pinInputField, { marginBottom: 14, textAlign: "left" }]}
+                style={[styles.pinInputField, { marginBottom: 12, textAlign: "left" }]}
                 placeholder="Password"
-                placeholderTextColor="#64748b"
+                placeholderTextColor={themeColors.textMuted}
                 secureTextEntry={true}
                 value={loginPassword}
                 onChangeText={setLoginPassword}
-                onSubmitEditing={handleMobileSignIn}
               />
+
+              {/* Offline-Safe Mobile Captcha */}
+              <View
+                style={{
+                  borderRadius: 10,
+                  borderWidth: 1,
+                  borderColor: mobileCaptchaVerified ? themeColors.successBorder : themeColors.borderSubtle,
+                  backgroundColor: mobileCaptchaVerified ? themeColors.successSoft : themeColors.bgElevated,
+                  padding: 12,
+                  marginBottom: 14,
+                }}
+              >
+                <View style={{ flexDirection: "row", justifyContent: "space-between", alignItems: "center", marginBottom: mobileCaptchaVerified ? 0 : 8 }}>
+                  <Text style={{ color: mobileCaptchaVerified ? themeColors.success : themeColors.textPrimary, fontSize: 12, fontWeight: "700" }}>
+                    {mobileCaptchaVerified ? "HUMAN VERIFIED" : `CAPTCHA: ${captchaChallenge.a} + ${captchaChallenge.b} = ?`}
+                  </Text>
+                  <TouchableOpacity onPress={resetMobileCaptcha}>
+                    <Text style={{ color: themeColors.accent, fontSize: 11, fontWeight: "700" }}>NEW</Text>
+                  </TouchableOpacity>
+                </View>
+                {!mobileCaptchaVerified && (
+                  <TextInput
+                    style={[styles.pinInputField, { textAlign: "left", marginBottom: 0 }]}
+                    placeholder="Enter sum to verify"
+                    placeholderTextColor={themeColors.textMuted}
+                    keyboardType="number-pad"
+                    value={captchaInput}
+                    onChangeText={(val) => {
+                      const clean = val.replace(/\D/g, "").slice(0, 3);
+                      setCaptchaInput(clean);
+                      if (clean && Number(clean) === captchaChallenge.answer) {
+                        setMobileCaptchaVerified(true);
+                        setLoginError(null);
+                      }
+                    }}
+                  />
+                )}
+              </View>
 
               <TouchableOpacity
                 disabled={loginLoading}
@@ -2401,7 +2534,7 @@ export default function AuthenticatorScreen() {
   );
 }
 
-const styles = StyleSheet.create({
+const createStyles = (colors: ThemeColors) => StyleSheet.create({
   outerRoot: {
     flex: 1,
     backgroundColor: "#03060c",
@@ -2438,12 +2571,12 @@ const styles = StyleSheet.create({
     borderRadius: 24,
   },
   dockTabActive: {
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
   },
   dockTabText: {
     fontSize: 10.5,
     fontWeight: "700",
-    color: "#94a3b8",
+    color: colors.textMuted,
     letterSpacing: 0.6,
   },
   dockTabTextActive: {
@@ -2457,7 +2590,7 @@ const styles = StyleSheet.create({
     paddingBottom: 90,
   },
   accountCardCopied: {
-    borderColor: "#54f4fc",
+    borderColor: colors.accent,
     backgroundColor: "rgba(84, 244, 252, 0.08)",
   },
   copyPill: {
@@ -2469,13 +2602,13 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   copyPillActive: {
-    backgroundColor: "#54f4fc",
-    borderColor: "#54f4fc",
+    backgroundColor: colors.accent,
+    borderColor: colors.accent,
   },
   copyPillText: {
     fontSize: 9,
     fontWeight: "700",
-    color: "#54f4fc",
+    color: colors.accent,
     letterSpacing: 0.6,
   },
   copyPillTextActive: {
@@ -2492,20 +2625,20 @@ const styles = StyleSheet.create({
   cardProgressTrack: {
     flex: 1,
     height: 3,
-    backgroundColor: "rgba(255, 255, 255, 0.1)",
+    backgroundColor: colors.borderSubtle,
     borderRadius: 1.5,
     overflow: "hidden",
   },
   cardProgressBar: {
     height: "100%",
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
     borderRadius: 1.5,
   },
   cardSecondsText: {
     fontSize: 9.5,
     fontFamily: "monospace",
     fontWeight: "700",
-    color: "#94a3b8",
+    color: colors.textMuted,
     width: 24,
     textAlign: "right",
   },
@@ -2516,7 +2649,7 @@ const styles = StyleSheet.create({
     marginTop: 4,
     paddingTop: 6,
     borderTopWidth: 1,
-    borderTopColor: "rgba(255, 255, 255, 0.05)",
+    borderTopColor: colors.bgElevated,
   },
   cardDeleteBtn: {
     paddingHorizontal: 6,
@@ -2525,7 +2658,7 @@ const styles = StyleSheet.create({
   cardDeleteBtnText: {
     fontSize: 9,
     fontWeight: "700",
-    color: "#f43f5e",
+    color: colors.danger,
     letterSpacing: 0.5,
   },
   lockGateContainer: {
@@ -2566,31 +2699,31 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
   },
   lockBadgeText: {
     fontSize: 9.5,
     fontWeight: "800",
-    color: "#54f4fc",
+    color: colors.accent,
     letterSpacing: 1.2,
   },
   lockTitle: {
     fontSize: 22,
     fontWeight: "800",
-    color: "#ffffff",
+    color: colors.textPrimary,
     letterSpacing: -0.4,
     marginBottom: 8,
     textAlign: "center",
   },
   lockSubtitle: {
     fontSize: 12.5,
-    color: "#94a3b8",
+    color: colors.textMuted,
     textAlign: "center",
     lineHeight: 18,
     marginBottom: 24,
   },
   primaryUnlockButton: {
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
     width: "100%",
     paddingVertical: 14,
     borderRadius: 8,
@@ -2614,7 +2747,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   portalHelperButtonText: {
-    color: "#cbd5e1",
+    color: colors.textSecondary,
     fontSize: 11,
     fontWeight: "700",
     letterSpacing: 0.8,
@@ -2640,7 +2773,7 @@ const styles = StyleSheet.create({
   quickLockIconText: {
     fontSize: 10,
     fontWeight: "800",
-    color: "#fb7185",
+    color: colors.danger,
     letterSpacing: 0.8,
   },
   webTabContainer: {
@@ -2675,7 +2808,7 @@ const styles = StyleSheet.create({
   welcomeIconShield: {
     width: 32,
     height: 4,
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
     borderRadius: 2,
     marginBottom: 14,
   },
@@ -2683,13 +2816,13 @@ const styles = StyleSheet.create({
     fontSize: 14,
     fontWeight: "800",
     letterSpacing: 1.5,
-    color: "#ffffff",
+    color: colors.textPrimary,
     marginBottom: 8,
     textAlign: "center",
   },
   welcomeDescription: {
     fontSize: 12,
-    color: "#94a3b8",
+    color: colors.textMuted,
     textAlign: "center",
     lineHeight: 18,
     marginBottom: 20,
@@ -2699,7 +2832,7 @@ const styles = StyleSheet.create({
     gap: 10,
   },
   welcomePrimaryBtn: {
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
     paddingVertical: 12,
     borderRadius: 6,
     alignItems: "center",
@@ -2720,7 +2853,7 @@ const styles = StyleSheet.create({
     justifyContent: "center",
   },
   welcomePortalBtnText: {
-    color: "#cbd5e1",
+    color: colors.textSecondary,
     fontSize: 11,
     fontWeight: "700",
     letterSpacing: 0.6,
@@ -2728,7 +2861,7 @@ const styles = StyleSheet.create({
   instructionCard: {
     backgroundColor: "rgba(7, 12, 22, 0.7)",
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.08)",
+    borderColor: colors.borderSubtle,
     borderRadius: 8,
     padding: 16,
     width: "100%",
@@ -2736,13 +2869,13 @@ const styles = StyleSheet.create({
   instructionHeading: {
     fontSize: 10.5,
     fontWeight: "800",
-    color: "#54f4fc",
+    color: colors.accent,
     letterSpacing: 1,
     marginBottom: 10,
   },
   instructionStep: {
     fontSize: 11.5,
-    color: "#94a3b8",
+    color: colors.textMuted,
     lineHeight: 18,
     marginBottom: 6,
   },
@@ -2757,7 +2890,7 @@ const styles = StyleSheet.create({
     marginTop: 6,
   },
   resourceButtonText: {
-    color: "#54f4fc",
+    color: colors.accent,
     fontSize: 11,
     fontWeight: "800",
     letterSpacing: 0.8,
@@ -2767,7 +2900,7 @@ const styles = StyleSheet.create({
     backgroundColor: "rgba(15, 23, 42, 0.95)",
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.2)",
+    borderColor: colors.borderAccent,
     padding: 3,
     marginTop: 10,
     gap: 4,
@@ -2780,12 +2913,12 @@ const styles = StyleSheet.create({
     borderRadius: 6,
   },
   navTabActive: {
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
   },
   navTabText: {
     fontSize: 10,
     fontWeight: "700",
-    color: "#94a3b8",
+    color: colors.textMuted,
     letterSpacing: 0.6,
   },
   navTabTextActive: {
@@ -2805,7 +2938,7 @@ const styles = StyleSheet.create({
     flex: 1,
   },
   emptyActionButton: {
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
     paddingHorizontal: 16,
     paddingVertical: 10,
     borderRadius: 6,
@@ -2828,13 +2961,13 @@ const styles = StyleSheet.create({
   securitySectionTitle: {
     fontSize: 11,
     fontWeight: "800",
-    color: "#54f4fc",
+    color: colors.accent,
     letterSpacing: 1,
     marginBottom: 6,
   },
   securitySectionSubtitle: {
     fontSize: 10.5,
-    color: "#94a3b8",
+    color: colors.textMuted,
     marginBottom: 12,
     lineHeight: 15,
   },
@@ -2844,11 +2977,11 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingVertical: 8,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(255, 255, 255, 0.05)",
+    borderBottomColor: colors.bgElevated,
   },
   securityDetailLabel: {
     fontSize: 11,
-    color: "#cbd5e1",
+    color: colors.textSecondary,
     fontWeight: "500",
   },
   securityDetailValue: {
@@ -2863,7 +2996,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: "rgba(5, 8, 17, 0.8)",
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.2)",
+    borderColor: colors.borderAccent,
     borderRadius: 6,
     padding: 12,
     marginTop: 6,
@@ -2875,12 +3008,12 @@ const styles = StyleSheet.create({
   switchTitle: {
     fontSize: 11.5,
     fontWeight: "700",
-    color: "#ffffff",
+    color: colors.textPrimary,
     marginBottom: 2,
   },
   switchDesc: {
     fontSize: 9.5,
-    color: "#94a3b8",
+    color: colors.textMuted,
     lineHeight: 14,
   },
   switchPill: {
@@ -2889,20 +3022,20 @@ const styles = StyleSheet.create({
     paddingVertical: 4,
     borderRadius: 4,
     borderWidth: 1,
-    borderColor: "#64748b",
+    borderColor: colors.textMuted,
   },
   switchPillActive: {
     backgroundColor: "rgba(16, 185, 129, 0.2)",
-    borderColor: "#10b981",
+    borderColor: colors.success,
   },
   switchPillText: {
     fontSize: 9,
     fontWeight: "800",
-    color: "#94a3b8",
+    color: colors.textMuted,
     letterSpacing: 0.8,
   },
   switchPillTextActive: {
-    color: "#10b981",
+    color: colors.success,
   },
   container: {
     flex: 1,
@@ -2930,7 +3063,7 @@ const styles = StyleSheet.create({
     height: 46,
     borderRadius: 8,
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.35)",
+    borderColor: colors.borderAccent,
     marginTop: 2,
   },
   headerTextGroup: {
@@ -2946,23 +3079,23 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
   },
   brandBadge: {
     fontSize: 10,
     fontWeight: "700",
     letterSpacing: 1.5,
-    color: "#54f4fc",
+    color: colors.accent,
   },
   headerTitle: {
     fontSize: 20,
     fontWeight: "800",
-    color: "#ffffff",
+    color: colors.textPrimary,
     letterSpacing: -0.3,
   },
   headerSubtitle: {
     fontSize: 11,
-    color: "#94a3b8",
+    color: colors.textMuted,
     fontWeight: "500",
     marginTop: 1,
   },
@@ -2977,7 +3110,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
     backgroundColor: "rgba(15, 23, 42, 0.8)",
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.2)",
+    borderColor: colors.borderAccent,
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
@@ -2989,18 +3122,18 @@ const styles = StyleSheet.create({
     borderRadius: 2.5,
   },
   dotCyan: {
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
   },
   dotGreen: {
-    backgroundColor: "#10b981",
+    backgroundColor: colors.success,
   },
   dotSlate: {
-    backgroundColor: "#64748b",
+    backgroundColor: colors.textMuted,
   },
   statusPillText: {
     fontSize: 8.5,
     fontWeight: "700",
-    color: "#cbd5e1",
+    color: colors.textSecondary,
     letterSpacing: 0.6,
     fontFamily: "monospace",
   },
@@ -3033,21 +3166,21 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "800",
     letterSpacing: 1,
-    color: "#f59e0b",
+    color: colors.warning,
   },
   vaultUnlockedTitle: {
     fontSize: 10,
     fontWeight: "800",
     letterSpacing: 1,
-    color: "#10b981",
+    color: colors.success,
   },
   vaultCardSubtitle: {
     fontSize: 9.5,
-    color: "#94a3b8",
+    color: colors.textMuted,
     marginTop: 2,
   },
   vaultUnlockButton: {
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
     paddingHorizontal: 10,
     paddingVertical: 6,
     borderRadius: 4,
@@ -3066,7 +3199,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   vaultLockButtonText: {
-    color: "#94a3b8",
+    color: colors.textMuted,
     fontSize: 9.5,
     fontWeight: "700",
     letterSpacing: 0.6,
@@ -3080,22 +3213,22 @@ const styles = StyleSheet.create({
     marginTop: 8,
     paddingTop: 8,
     borderTopWidth: 1,
-    borderTopColor: "rgba(255, 255, 255, 0.08)",
+    borderTopColor: colors.borderSubtle,
   },
   biometricToggleText: {
     fontSize: 9.5,
-    color: "#64748b",
+    color: colors.textMuted,
     flexShrink: 1,
     marginRight: 6,
   },
   biometricToggleAction: {
     fontSize: 9.5,
     fontWeight: "700",
-    color: "#54f4fc",
+    color: colors.accent,
     letterSpacing: 0.5,
   },
   timerCard: {
-    backgroundColor: "#070c16",
+    backgroundColor: colors.bgCard,
     borderWidth: 1,
     borderColor: "rgba(84, 244, 252, 0.18)",
     borderRadius: 8,
@@ -3112,27 +3245,27 @@ const styles = StyleSheet.create({
     fontSize: 9.5,
     fontWeight: "700",
     letterSpacing: 1,
-    color: "#94a3b8",
+    color: colors.textMuted,
   },
   timerCountdown: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#54f4fc",
+    color: colors.accent,
     fontFamily: "monospace",
   },
   progressTrack: {
     height: 4,
-    backgroundColor: "#0f172a",
+    backgroundColor: colors.bgElevated,
     borderRadius: 2,
     overflow: "hidden",
   },
   progressBar: {
     height: "100%",
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
     borderRadius: 2,
   },
   enrollmentCard: {
-    backgroundColor: "#070c16",
+    backgroundColor: colors.bgCard,
     borderWidth: 1,
     borderColor: "rgba(84, 244, 252, 0.18)",
     borderRadius: 8,
@@ -3151,16 +3284,16 @@ const styles = StyleSheet.create({
     fontSize: 10.5,
     fontWeight: "700",
     letterSpacing: 1.2,
-    color: "#54f4fc",
+    color: colors.accent,
     flexShrink: 1,
   },
   segmentContainer: {
     flexDirection: "row",
-    backgroundColor: "#0f172a",
+    backgroundColor: colors.bgElevated,
     borderRadius: 6,
     padding: 2,
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.2)",
+    borderColor: colors.borderAccent,
   },
   segmentTab: {
     paddingHorizontal: 10,
@@ -3168,25 +3301,25 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   segmentTabActive: {
-    backgroundColor: "rgba(84, 244, 252, 0.2)",
+    backgroundColor: colors.borderAccent,
   },
   segmentTabText: {
     fontSize: 9,
     fontWeight: "700",
-    color: "#64748b",
+    color: colors.textMuted,
     letterSpacing: 0.5,
   },
   segmentTabTextActive: {
-    color: "#54f4fc",
+    color: colors.accent,
   },
   modeDescriptionText: {
     fontSize: 10.5,
-    color: "#94a3b8",
+    color: colors.textMuted,
     lineHeight: 15,
     marginBottom: 10,
   },
   primaryScanButton: {
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
     paddingVertical: 10,
     borderRadius: 6,
     alignItems: "center",
@@ -3201,16 +3334,16 @@ const styles = StyleSheet.create({
   inputField: {
     backgroundColor: "#0b1120",
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.2)",
+    borderColor: colors.borderAccent,
     borderRadius: 6,
     paddingHorizontal: 10,
     paddingVertical: 8,
     fontSize: 12,
-    color: "#ffffff",
+    color: colors.textPrimary,
     marginBottom: 8,
   },
   inputFieldError: {
-    borderColor: "#ef4444",
+    borderColor: colors.danger,
   },
   validationErrorBox: {
     backgroundColor: "rgba(239, 68, 68, 0.1)",
@@ -3236,7 +3369,7 @@ const styles = StyleSheet.create({
   },
   resolvingText: {
     fontSize: 10,
-    color: "#54f4fc",
+    color: colors.accent,
   },
   resolvedIdentityBox: {
     backgroundColor: "rgba(16, 185, 129, 0.1)",
@@ -3249,20 +3382,20 @@ const styles = StyleSheet.create({
   },
   resolvedIdentityText: {
     fontSize: 10,
-    color: "#34d399",
+    color: colors.success,
     fontWeight: "600",
   },
   addKeyButton: {
     backgroundColor: "transparent",
     borderWidth: 1,
-    borderColor: "#54f4fc",
+    borderColor: colors.accent,
     paddingVertical: 10,
     borderRadius: 6,
     alignItems: "center",
     justifyContent: "center",
   },
   addKeyButtonText: {
-    color: "#54f4fc",
+    color: colors.accent,
     fontWeight: "800",
     fontSize: 11,
     letterSpacing: 1,
@@ -3277,7 +3410,7 @@ const styles = StyleSheet.create({
     fontSize: 10,
     fontWeight: "700",
     letterSpacing: 1.1,
-    color: "#94a3b8",
+    color: colors.textMuted,
   },
   counterBadge: {
     backgroundColor: "rgba(84, 244, 252, 0.15)",
@@ -3290,18 +3423,18 @@ const styles = StyleSheet.create({
   counterBadgeText: {
     fontSize: 10.5,
     fontWeight: "700",
-    color: "#54f4fc",
+    color: colors.accent,
     fontFamily: "monospace",
   },
   listContent: {
     paddingBottom: 24,
   },
   accountCard: {
-    backgroundColor: "#070c16",
+    backgroundColor: colors.bgCard,
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.2)",
+    borderColor: colors.borderAccent,
     borderLeftWidth: 3,
-    borderLeftColor: "#54f4fc",
+    borderLeftColor: colors.accent,
     borderRadius: 8,
     padding: 12,
     marginBottom: 10,
@@ -3322,7 +3455,7 @@ const styles = StyleSheet.create({
   accountName: {
     fontSize: 13,
     fontWeight: "700",
-    color: "#ffffff",
+    color: colors.textPrimary,
   },
   issuerBadge: {
     backgroundColor: "rgba(84, 244, 252, 0.1)",
@@ -3335,22 +3468,22 @@ const styles = StyleSheet.create({
   issuerBadgeText: {
     fontSize: 8,
     fontWeight: "700",
-    color: "#54f4fc",
+    color: colors.accent,
     letterSpacing: 0.6,
   },
   protocolBadge: {
-    backgroundColor: "#0f172a",
+    backgroundColor: colors.bgElevated,
     paddingHorizontal: 6,
     paddingVertical: 2,
     borderRadius: 4,
     borderWidth: 1,
-    borderColor: "rgba(255, 255, 255, 0.1)",
+    borderColor: colors.borderSubtle,
   },
   protocolBadgeText: {
     fontSize: 8.5,
     fontWeight: "700",
     letterSpacing: 0.8,
-    color: "#94a3b8",
+    color: colors.textMuted,
     fontFamily: "monospace",
   },
   tokenRow: {
@@ -3373,19 +3506,19 @@ const styles = StyleSheet.create({
   tokenLockedText: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#f59e0b",
+    color: colors.warning,
     letterSpacing: 1,
   },
   tokenLockedSubtext: {
     fontSize: 9,
-    color: "#94a3b8",
+    color: colors.textMuted,
     marginTop: 2,
   },
   totpToken: {
     fontSize: 26,
     fontWeight: "800",
     letterSpacing: 3,
-    color: "#54f4fc",
+    color: colors.accent,
     fontFamily: "monospace",
   },
   removeButton: {
@@ -3400,20 +3533,20 @@ const styles = StyleSheet.create({
     fontSize: 9.5,
     fontWeight: "700",
     letterSpacing: 0.8,
-    color: "#ef4444",
+    color: colors.danger,
   },
   secretHintText: {
     fontSize: 9.5,
-    color: "#64748b",
+    color: colors.textMuted,
     fontFamily: "monospace",
     letterSpacing: 0.5,
     marginTop: 4,
   },
   emptyCard: {
-    backgroundColor: "#070c16",
+    backgroundColor: colors.bgCard,
     borderWidth: 1,
     borderStyle: "dashed",
-    borderColor: "rgba(84, 244, 252, 0.2)",
+    borderColor: colors.borderAccent,
     borderRadius: 6,
     padding: 24,
     alignItems: "center",
@@ -3422,7 +3555,7 @@ const styles = StyleSheet.create({
   emptyBracket: {
     width: 28,
     height: 2,
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
     marginBottom: 12,
   },
   emptyTitle: {
@@ -3434,7 +3567,7 @@ const styles = StyleSheet.create({
   },
   emptyDescription: {
     fontSize: 11.5,
-    color: "#64748b",
+    color: colors.textMuted,
     textAlign: "center",
     lineHeight: 17,
   },
@@ -3448,19 +3581,19 @@ const styles = StyleSheet.create({
     alignItems: "center",
     paddingHorizontal: 16,
     paddingVertical: 14,
-    backgroundColor: "#070c16",
+    backgroundColor: colors.bgCard,
     borderBottomWidth: 1,
-    borderBottomColor: "rgba(84, 244, 252, 0.2)",
+    borderBottomColor: colors.borderAccent,
   },
   scannerNavTitle: {
     fontSize: 14,
     fontWeight: "700",
-    color: "#ffffff",
+    color: colors.textPrimary,
     letterSpacing: 0.5,
   },
   scannerNavSubtitle: {
     fontSize: 11,
-    color: "#94a3b8",
+    color: colors.textMuted,
     marginTop: 2,
   },
   scannerCloseButton: {
@@ -3471,7 +3604,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   scannerCloseButtonText: {
-    color: "#54f4fc",
+    color: colors.accent,
     fontWeight: "700",
     fontSize: 11,
     letterSpacing: 1,
@@ -3498,7 +3631,7 @@ const styles = StyleSheet.create({
     position: "absolute",
     width: 24,
     height: 24,
-    borderColor: "#54f4fc",
+    borderColor: colors.accent,
   },
   topLeftBracket: {
     top: 0,
@@ -3526,7 +3659,7 @@ const styles = StyleSheet.create({
   },
   viewfinderHint: {
     marginTop: 20,
-    color: "#ffffff",
+    color: colors.textPrimary,
     fontSize: 12,
     fontWeight: "600",
     backgroundColor: "rgba(0, 0, 0, 0.75)",
@@ -3541,12 +3674,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   cameraFallbackText: {
-    color: "#94a3b8",
+    color: colors.textMuted,
     fontSize: 13,
   },
   pushModalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0, 0, 0, 0.85)",
+    backgroundColor: colors.bgOverlay,
     justifyContent: "center",
     alignItems: "center",
     padding: 20,
@@ -3554,12 +3687,12 @@ const styles = StyleSheet.create({
   pushModalCard: {
     width: "100%",
     maxWidth: 380,
-    backgroundColor: "#070c16",
+    backgroundColor: colors.bgCard,
     borderWidth: 1.5,
-    borderColor: "#54f4fc",
+    borderColor: colors.accent,
     borderRadius: 12,
     padding: 20,
-    shadowColor: "#54f4fc",
+    shadowColor: colors.accent,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.25,
     shadowRadius: 16,
@@ -3575,16 +3708,16 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
   },
   pushModalTitle: {
     fontSize: 12,
     fontWeight: "800",
-    color: "#54f4fc",
+    color: colors.accent,
     letterSpacing: 1.2,
   },
   pushDetailsBox: {
-    backgroundColor: "#0b1322",
+    backgroundColor: colors.bgElevated,
     borderWidth: 1,
     borderColor: "rgba(84, 244, 252, 0.15)",
     borderRadius: 8,
@@ -3611,13 +3744,13 @@ const styles = StyleSheet.create({
     width: 5,
     height: 5,
     borderRadius: 2.5,
-    backgroundColor: "#54f4fc",
+    backgroundColor: colors.accent,
     marginRight: 4,
   },
   verifiedIdentityText: {
     fontSize: 8,
     fontWeight: "700",
-    color: "#54f4fc",
+    color: colors.accent,
     letterSpacing: 0.6,
   },
   crossAccountWarningBadge: {
@@ -3634,19 +3767,19 @@ const styles = StyleSheet.create({
     width: 5,
     height: 5,
     borderRadius: 2.5,
-    backgroundColor: "#f59e0b",
+    backgroundColor: colors.warning,
     marginRight: 4,
   },
   crossAccountWarningText: {
     fontSize: 8,
     fontWeight: "700",
-    color: "#f59e0b",
+    color: colors.warning,
     letterSpacing: 0.6,
   },
   crossAccountNotice: {
     marginTop: 8,
     fontSize: 10,
-    color: "#fbbf24",
+    color: colors.warning,
     lineHeight: 14,
     backgroundColor: "rgba(245, 158, 11, 0.08)",
     padding: 6,
@@ -3657,32 +3790,32 @@ const styles = StyleSheet.create({
   pushOriginLabel: {
     fontSize: 9,
     fontWeight: "700",
-    color: "#64748b",
+    color: colors.textMuted,
     letterSpacing: 1,
     marginBottom: 2,
   },
   pushOriginValue: {
     fontSize: 13,
     fontWeight: "700",
-    color: "#ffffff",
+    color: colors.textPrimary,
     marginBottom: 8,
   },
   pushEmailLabel: {
     fontSize: 9,
     fontWeight: "700",
-    color: "#64748b",
+    color: colors.textMuted,
     letterSpacing: 1,
     marginBottom: 2,
   },
   pushEmailValue: {
     fontSize: 12,
     fontWeight: "600",
-    color: "#94a3b8",
+    color: colors.textMuted,
     fontFamily: "monospace",
   },
   pushPromptText: {
     fontSize: 12,
-    color: "#cbd5e1",
+    color: colors.textSecondary,
     textAlign: "center",
     marginBottom: 16,
     lineHeight: 18,
@@ -3697,7 +3830,7 @@ const styles = StyleSheet.create({
     flex: 1,
     backgroundColor: "rgba(84, 244, 252, 0.08)",
     borderWidth: 1.5,
-    borderColor: "#54f4fc",
+    borderColor: colors.accent,
     borderRadius: 8,
     paddingVertical: 14,
     alignItems: "center",
@@ -3706,26 +3839,26 @@ const styles = StyleSheet.create({
   numberOptionText: {
     fontSize: 22,
     fontWeight: "800",
-    color: "#54f4fc",
+    color: colors.accent,
     fontFamily: "monospace",
   },
   denyButton: {
     borderWidth: 1,
-    borderColor: "#ef4444",
+    borderColor: colors.danger,
     backgroundColor: "rgba(239, 68, 68, 0.08)",
     paddingVertical: 12,
     borderRadius: 8,
     alignItems: "center",
   },
   denyButtonText: {
-    color: "#ef4444",
+    color: colors.danger,
     fontSize: 11,
     fontWeight: "800",
     letterSpacing: 1,
   },
   policyDivider: {
     height: 1,
-    backgroundColor: "rgba(255, 255, 255, 0.08)",
+    backgroundColor: colors.borderSubtle,
     marginVertical: 14,
   },
   pinConfigRow: {
@@ -3735,15 +3868,15 @@ const styles = StyleSheet.create({
     gap: 12,
   },
   pinChangeButton: {
-    backgroundColor: "rgba(84, 244, 252, 0.12)",
+    backgroundColor: colors.accentSoft,
     borderWidth: 1,
-    borderColor: "#54f4fc",
+    borderColor: colors.accent,
     paddingHorizontal: 12,
     paddingVertical: 8,
     borderRadius: 6,
   },
   pinChangeButtonText: {
-    color: "#54f4fc",
+    color: colors.accent,
     fontSize: 10,
     fontWeight: "800",
     letterSpacing: 0.6,
@@ -3763,7 +3896,7 @@ const styles = StyleSheet.create({
     borderRadius: 4,
   },
   auditClearBtnText: {
-    color: "#fb7185",
+    color: colors.danger,
     fontSize: 9,
     fontWeight: "800",
     letterSpacing: 0.8,
@@ -3797,7 +3930,7 @@ const styles = StyleSheet.create({
     borderColor: "rgba(16, 185, 129, 0.4)",
   },
   auditTypeBadgeDanger: {
-    backgroundColor: "rgba(239, 68, 68, 0.15)",
+    backgroundColor: colors.dangerSoft,
     borderWidth: 1,
     borderColor: "rgba(239, 68, 68, 0.4)",
   },
@@ -3809,21 +3942,21 @@ const styles = StyleSheet.create({
   auditTypeBadgeText: {
     fontSize: 9,
     fontWeight: "800",
-    color: "#94a3b8",
+    color: colors.textMuted,
     letterSpacing: 0.6,
   },
   auditTypeBadgeTextSuccess: {
-    color: "#10b981",
+    color: colors.success,
   },
   auditTypeBadgeTextDanger: {
-    color: "#ef4444",
+    color: colors.danger,
   },
   auditTypeBadgeTextInfo: {
-    color: "#54f4fc",
+    color: colors.accent,
   },
   auditTimeText: {
     fontSize: 10,
-    color: "#64748b",
+    color: colors.textMuted,
     fontFamily: "monospace",
   },
   auditItemTitle: {
@@ -3834,13 +3967,13 @@ const styles = StyleSheet.create({
   },
   auditItemDetails: {
     fontSize: 11,
-    color: "#94a3b8",
+    color: colors.textMuted,
     lineHeight: 16,
     marginBottom: 4,
   },
   auditItemOrigin: {
     fontSize: 10,
-    color: "#54f4fc",
+    color: colors.accent,
     fontFamily: "monospace",
   },
   auditItemAccount: {
@@ -3853,7 +3986,7 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   emptyAuditText: {
-    color: "#64748b",
+    color: colors.textMuted,
     fontSize: 11,
     fontStyle: "italic",
   },
@@ -3872,11 +4005,11 @@ const styles = StyleSheet.create({
     width: 6,
     height: 6,
     borderRadius: 3,
-    backgroundColor: "#f59e0b",
+    backgroundColor: colors.warning,
     marginRight: 6,
   },
   setupBadgeText: {
-    color: "#fbbf24",
+    color: colors.warning,
     fontSize: 9.5,
     fontWeight: "800",
     letterSpacing: 0.8,
@@ -3888,7 +4021,7 @@ const styles = StyleSheet.create({
     borderRadius: 8,
     paddingHorizontal: 14,
     paddingVertical: 12,
-    color: "#ffffff",
+    color: colors.textPrimary,
     fontSize: 14,
     width: "100%",
     marginBottom: 10,
@@ -3897,7 +4030,7 @@ const styles = StyleSheet.create({
     fontWeight: "700",
   },
   pinErrorBanner: {
-    backgroundColor: "rgba(239, 68, 68, 0.15)",
+    backgroundColor: colors.dangerSoft,
     borderWidth: 1,
     borderColor: "rgba(239, 68, 68, 0.4)",
     paddingVertical: 8,
@@ -3908,12 +4041,12 @@ const styles = StyleSheet.create({
     alignItems: "center",
   },
   pinErrorBannerText: {
-    color: "#ef4444",
+    color: colors.danger,
     fontSize: 10.5,
     fontWeight: "700",
   },
   orDividerText: {
-    color: "#64748b",
+    color: colors.textMuted,
     fontSize: 10,
     fontWeight: "700",
     letterSpacing: 0.8,
@@ -3925,7 +4058,7 @@ const styles = StyleSheet.create({
   },
   deleteModalOverlay: {
     flex: 1,
-    backgroundColor: "rgba(0, 0, 0, 0.85)",
+    backgroundColor: colors.bgOverlay,
     justifyContent: "center",
     alignItems: "center",
     padding: 20,
@@ -3933,12 +4066,12 @@ const styles = StyleSheet.create({
   deleteModalCard: {
     width: "100%",
     maxWidth: 380,
-    backgroundColor: "#070c16",
+    backgroundColor: colors.bgCard,
     borderWidth: 1.5,
     borderColor: "rgba(244, 63, 94, 0.6)",
     borderRadius: 12,
     padding: 20,
-    shadowColor: "#f43f5e",
+    shadowColor: colors.danger,
     shadowOffset: { width: 0, height: 4 },
     shadowOpacity: 0.25,
     shadowRadius: 16,
@@ -3954,16 +4087,16 @@ const styles = StyleSheet.create({
     width: 8,
     height: 8,
     borderRadius: 4,
-    backgroundColor: "#f43f5e",
+    backgroundColor: colors.danger,
   },
   deleteModalTitle: {
     fontSize: 12,
     fontWeight: "800",
-    color: "#f43f5e",
+    color: colors.danger,
     letterSpacing: 1.2,
   },
   deleteDetailsBox: {
-    backgroundColor: "#0b1322",
+    backgroundColor: colors.bgElevated,
     borderWidth: 1,
     borderColor: "rgba(244, 63, 94, 0.2)",
     borderRadius: 8,
@@ -3973,38 +4106,38 @@ const styles = StyleSheet.create({
   deleteIdentityLabel: {
     fontSize: 9,
     fontWeight: "700",
-    color: "#94a3b8",
+    color: colors.textMuted,
     letterSpacing: 1,
     marginBottom: 2,
   },
   deleteIdentityValue: {
     fontSize: 13,
     fontWeight: "700",
-    color: "#ffffff",
+    color: colors.textPrimary,
     marginBottom: 8,
   },
   deleteIssuerLabel: {
     fontSize: 9,
     fontWeight: "700",
-    color: "#94a3b8",
+    color: colors.textMuted,
     letterSpacing: 1,
     marginBottom: 2,
   },
   deleteIssuerValue: {
     fontSize: 11,
     fontWeight: "600",
-    color: "#54f4fc",
+    color: colors.accent,
     marginBottom: 6,
   },
   deleteKeyHintText: {
     fontSize: 9.5,
     fontFamily: "monospace",
-    color: "#64748b",
+    color: colors.textMuted,
     letterSpacing: 0.5,
   },
   deleteWarningNotice: {
     fontSize: 11,
-    color: "#cbd5e1",
+    color: colors.textSecondary,
     lineHeight: 16,
     marginBottom: 18,
   },
@@ -4015,7 +4148,7 @@ const styles = StyleSheet.create({
   deleteModalCancelBtn: {
     flex: 1,
     paddingVertical: 11,
-    backgroundColor: "rgba(255, 255, 255, 0.05)",
+    backgroundColor: colors.bgElevated,
     borderWidth: 1,
     borderColor: "rgba(255, 255, 255, 0.15)",
     borderRadius: 6,
@@ -4025,17 +4158,17 @@ const styles = StyleSheet.create({
   deleteModalCancelText: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#94a3b8",
+    color: colors.textMuted,
     letterSpacing: 0.8,
   },
   deleteModalConfirmBtn: {
     flex: 1,
     paddingVertical: 11,
-    backgroundColor: "#e11d48",
+    backgroundColor: colors.danger,
     borderRadius: 6,
     alignItems: "center",
     justifyContent: "center",
-    shadowColor: "#e11d48",
+    shadowColor: colors.danger,
     shadowOffset: { width: 0, height: 2 },
     shadowOpacity: 0.35,
     shadowRadius: 6,
@@ -4044,11 +4177,11 @@ const styles = StyleSheet.create({
   deleteModalConfirmText: {
     fontSize: 11,
     fontWeight: "800",
-    color: "#ffffff",
+    color: colors.textPrimary,
     letterSpacing: 0.8,
   },
   driftWarningBanner: {
-    backgroundColor: "rgba(245, 158, 11, 0.14)",
+    backgroundColor: colors.warningSoft,
     borderWidth: 1,
     borderColor: "rgba(245, 158, 11, 0.4)",
     borderRadius: 8,
@@ -4058,13 +4191,13 @@ const styles = StyleSheet.create({
   driftWarningText: {
     fontSize: 10,
     fontWeight: "700",
-    color: "#fbbf24",
+    color: colors.warning,
     lineHeight: 14,
   },
   minimizedChallengeBanner: {
-    backgroundColor: "rgba(84, 244, 252, 0.14)",
+    backgroundColor: colors.accentSoft,
     borderWidth: 1,
-    borderColor: "#54f4fc",
+    borderColor: colors.accent,
     borderRadius: 8,
     padding: 10,
     marginBottom: 10,
@@ -4072,12 +4205,12 @@ const styles = StyleSheet.create({
   minimizedChallengeText: {
     fontSize: 10,
     fontWeight: "800",
-    color: "#54f4fc",
+    color: colors.accent,
     textAlign: "center",
     letterSpacing: 0.6,
   },
   revokedBadge: {
-    backgroundColor: "rgba(244, 63, 94, 0.16)",
+    backgroundColor: colors.dangerSoft,
     borderWidth: 1,
     borderColor: "rgba(244, 63, 94, 0.45)",
     borderRadius: 4,
@@ -4089,7 +4222,7 @@ const styles = StyleSheet.create({
   revokedBadgeText: {
     fontSize: 8.5,
     fontWeight: "800",
-    color: "#fb7185",
+    color: colors.danger,
     letterSpacing: 0.5,
   },
   cardActionsGroup: {
@@ -4104,17 +4237,17 @@ const styles = StyleSheet.create({
   cardActivityBtnText: {
     fontSize: 9,
     fontWeight: "700",
-    color: "#54f4fc",
+    color: colors.accent,
     letterSpacing: 0.5,
   },
   immutableBadgeText: {
     fontSize: 8.5,
     fontWeight: "800",
-    color: "#10b981",
+    color: colors.success,
     letterSpacing: 0.8,
   },
   lockChallengeNotice: {
-    backgroundColor: "rgba(84, 244, 252, 0.12)",
+    backgroundColor: colors.accentSoft,
     borderWidth: 1,
     borderColor: "rgba(84, 244, 252, 0.4)",
     borderRadius: 8,
@@ -4125,7 +4258,7 @@ const styles = StyleSheet.create({
   lockChallengeNoticeText: {
     fontSize: 10,
     fontWeight: "800",
-    color: "#54f4fc",
+    color: colors.accent,
     textAlign: "center",
     letterSpacing: 0.5,
   },
@@ -4133,16 +4266,16 @@ const styles = StyleSheet.create({
     width: "100%",
     maxWidth: 420,
     maxHeight: "80%",
-    backgroundColor: "#070c16",
+    backgroundColor: colors.bgCard,
     borderWidth: 1,
-    borderColor: "rgba(84, 244, 252, 0.35)",
+    borderColor: colors.borderAccent,
     borderRadius: 12,
     padding: 18,
   },
   activityAccountLabel: {
     fontSize: 11,
     fontWeight: "700",
-    color: "#54f4fc",
+    color: colors.accent,
     marginBottom: 12,
   },
   activityScrollList: {
