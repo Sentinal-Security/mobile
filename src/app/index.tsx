@@ -1735,8 +1735,8 @@ export default function AuthenticatorScreen() {
     </ScrollView>
   );
 
-  // Full-Screen Security Lock Gate
-  if (!isVaultUnlocked) {
+  // Full-Screen Security Lock Gate (only after an account is signed in)
+  if (!isVaultUnlocked && activeSessionUser) {
     if (isPinSetupMode || (!masterPin && (!hasBiometricHardware || !biometricEnrolled))) {
       return (
         <View style={styles.outerRoot}>
@@ -1869,6 +1869,20 @@ export default function AuthenticatorScreen() {
 
                 <TouchableOpacity style={styles.primaryUnlockButton} onPress={handleUnlockWithPin}>
                   <Text style={styles.primaryUnlockButtonText}>UNLOCK WITH PIN</Text>
+                </TouchableOpacity>
+
+                <TouchableOpacity
+                  style={[styles.portalHelperButton, { marginTop: 8 }]}
+                  onPress={async () => {
+                    await saveMasterPin("").catch(() => {});
+                    setMasterPin(null);
+                    setEnteredPin("");
+                    setPinErrorMessage(null);
+                    setIsVaultUnlocked(true);
+                    await handleSignOutActive();
+                  }}
+                >
+                  <Text style={styles.portalHelperButtonText}>RESET PIN &amp; SIGN IN AGAIN</Text>
                 </TouchableOpacity>
               </View>
             )}
