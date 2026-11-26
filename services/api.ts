@@ -1,4 +1,16 @@
 export const API_BASE_URL = "https://backend-pi68.onrender.com";
+export const WEB_PORTAL_URL = "https://web-beta-orcin-33.vercel.app";
+
+export interface MobileSessionUser {
+  userId: number;
+  email: string;
+  fullName: string;
+  role?: string;
+  company?: string;
+  mfaEnabled?: boolean;
+  ssoToken?: string;
+  profilePicture?: string | null;
+}
 
 export interface MfaSetupResponse {
   success: boolean;
@@ -26,6 +38,7 @@ export interface ServerAuditLogEntry {
   targetResource?: string;
   details: string;
   ipAddress?: string;
+  userAgent?: string;
   createdAt: string;
 }
 
@@ -157,5 +170,61 @@ export async function recordMobileTelemetry(payload: {
     clearTimeout(timer);
   } catch {
     // Fire and forget
+  }
+}
+
+export async function loginMobileAccount(
+  email: string,
+  password: string
+): Promise<{ success: boolean; message?: string; user?: MobileSessionUser }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 10000);
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/auth/mobile-login`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ email: email.trim().toLowerCase(), password }),
+      signal: controller.signal,
+    });
+    const json = await res.json();
+    if (!json.success) {
+      return { success: false, message: json.message || "Invalid email or password." };
+    }
+    return {
+      success: true,
+      message: json.message,
+      user: {
+        userId: Number(json.userId),
+        email: String(json.email || email).trim().toLowerCase(),
+        fullName: String(json.fullName || email),
+        role: json.role,
+        company: json.company,
+        mfaEnabled: Boolean(json.mfaEnabled),
+        ssoToken: json.ssoToken,
+        profilePicture: json.profilePicture ?? null,
+      },
+    };
+  } catch {
+    return { success: false, message: "Cannot reach backend server. Check your internet connection." };
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
+export async function fetchPersonalAuditLogs(
+  userId: number,
+  limit = 30
+): Promise<{ success: boolean; message?: string; data?: ServerAuditLogEntry[] }> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 8000);
+  try {
+    const res = await fetch(`${API_BASE_URL}/api/auth/audit-logs?userId=${userId}&limit=${limit}`, {
+      signal: controller.signal,
+    });
+    return await res.json();
+  } catch {
+    return { success: false, message: "Failed to load account activity logs." };
+  } finally {
+    clearTimeout(timer);
   }
 }
