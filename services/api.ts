@@ -8,6 +8,7 @@ export interface MobileSessionUser {
   role?: string;
   company?: string;
   mfaEnabled?: boolean;
+  mfaSecret?: string;
   ssoToken?: string;
   profilePicture?: string | null;
 }
@@ -200,6 +201,7 @@ export async function loginMobileAccount(
         role: json.role,
         company: json.company,
         mfaEnabled: Boolean(json.mfaEnabled),
+        mfaSecret: json.mfaSecret || undefined,
         ssoToken: json.ssoToken,
         profilePicture: json.profilePicture ?? null,
       },
