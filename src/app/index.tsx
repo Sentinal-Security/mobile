@@ -13,6 +13,7 @@ import {
   Platform,
   AppState,
   Linking,
+  Vibration,
   useWindowDimensions,
   type NativeSyntheticEvent,
   type NativeScrollEvent,
@@ -25,6 +26,7 @@ import * as Notifications from "expo-notifications";
 import * as LocalAuthentication from "expo-local-authentication";
 import * as SplashScreen from "expo-splash-screen";
 import * as Device from "expo-device";
+import * as SecureStore from "expo-secure-store";
 import {
   generateTotp,
   getSecondsRemaining,
@@ -37,6 +39,10 @@ import {
   bindDevice,
   unbindDevice,
   fetchAccountActivity,
+  loginMobileAccount,
+  fetchPersonalAuditLogs,
+  WEB_PORTAL_URL,
+  type MobileSessionUser,
   type ServerAuditLogEntry,
 } from "../../services/api";
 import {
@@ -127,6 +133,7 @@ export default function AuthenticatorScreen() {
   const [isChallengeMinimized, setIsChallengeMinimized] = useState(false);
   const [respondingChallenge, setRespondingChallenge] = useState(false);
   const [pushToken, setPushToken] = useState<string | null>(null);
+  const [notificationPermissionGranted, setNotificationPermissionGranted] = useState(false);
   const [deviceUuid, setDeviceUuid] = useState<string | null>(null);
   const deviceLabel = Device.modelName || Device.deviceName || `Sentinel ${Platform.OS.toUpperCase()}`;
 
@@ -136,6 +143,26 @@ export default function AuthenticatorScreen() {
   const [serverActivityLogs, setServerActivityLogs] = useState<ServerAuditLogEntry[]>([]);
   const [loadingActivity, setLoadingActivity] = useState(false);
   const [activityError, setActivityError] = useState<string | null>(null);
+
+  // Per-Account Mobile Login, Account Switcher & Personal Audit Logs
+  const MOBILE_SESSIONS_KEY = "sentinel_mobile_sessions_v1";
+  const [signedInAccounts, setSignedInAccounts] = useState<MobileSessionUser[]>([]);
+  const [activeAccountEmail, setActiveAccountEmail] = useState<string | null>(null);
+  const [showAccountLoginModal, setShowAccountLoginModal] = useState(false);
+  const [showAccountSwitcherModal, setShowAccountSwitcherModal] = useState(false);
+  const [loginEmail, setLoginEmail] = useState("");
+  const [loginPassword, setLoginPassword] = useState("");
+  const [loginLoading, setLoginLoading] = useState(false);
+  const [loginError, setLoginError] = useState<string | null>(null);
+  const [personalLogs, setPersonalLogs] = useState<ServerAuditLogEntry[]>([]);
+  const [personalLogsLoading, setPersonalLogsLoading] = useState(false);
+  const [personalLogsError, setPersonalLogsError] = useState<string | null>(null);
+
+  const activeSessionUser =
+    signedInAccounts.find((a) => a.email === activeAccountEmail) || signedInAccounts[0] || null;
+  const visibleAccounts = activeSessionUser
+    ? accounts.filter((a) => a.name?.trim().toLowerCase() === activeSessionUser.email.toLowerCase())
+    : [];
 
   // Audit Logs & Master PIN State
   const [auditLogs, setAuditLogs] = useState<AuditLogEntry[]>([]);
@@ -275,9 +302,12 @@ export default function AuthenticatorScreen() {
 
         const permStatus = await withTimeout(Notifications.getPermissionsAsync(), 1500);
         let granted = permStatus?.status === "granted";
-        if (!granted && Platform.OS !== "android") {
-          const reqRes = await withTimeout(Notifications.requestPermissionsAsync(), 2000);
+        if (!granted) {
+          const reqRes = await withTimeout(Notifications.requestPermissionsAsync(), 2500);
           granted = reqRes?.status === "granted";
+        }
+        if (isMounted) {
+          setNotificationPermissionGranted(granted);
         }
 
         if (granted && isMounted) {
@@ -297,6 +327,116 @@ export default function AuthenticatorScreen() {
       isMounted = false;
     };
   }, []);
+
+  // Hydrate multi-account mobile sessions from SecureStore
+  useEffect(() => {
+    const loadSessions = async () => {
+      try {
+        const raw =
+          Platform.OS === "web"
+            ? window.localStorage.getItem(MOBILE_SESSIONS_KEY)
+            : await SecureStore.getItemAsync(MOBILE_SESSIONS_KEY);
+        if (raw) {
+          const parsed = JSON.parse(raw);
+          if (Array.isArray(parsed?.accounts)) {
+            setSignedInAccounts(parsed.accounts);
+          }
+          if (parsed?.activeEmail) {
+            setActiveAccountEmail(String(parsed.activeEmail));
+          }
+        }
+      } catch {
+        // Ignore storage read notice
+      }
+    };
+    loadSessions();
+  }, []);
+
+  const persistMobileSessions = async (nextAccounts: MobileSessionUser[], nextActiveEmail: string | null) => {
+    try {
+      const payload = JSON.stringify({ accounts: nextAccounts, activeEmail: nextActiveEmail });
+      if (Platform.OS === "web") {
+        window.localStorage.setItem(MOBILE_SESSIONS_KEY, payload);
+      } else {
+        await SecureStore.setItemAsync(MOBILE_SESSIONS_KEY, payload);
+      }
+    } catch {
+      // Ignore storage write notice
+    }
+  };
+
+  const loadPersonalLogsForAccount = async (account: MobileSessionUser | null) => {
+    if (!account?.userId) {
+      setPersonalLogs([]);
+      return;
+    }
+    setPersonalLogsLoading(true);
+    setPersonalLogsError(null);
+    const res = await fetchPersonalAuditLogs(account.userId, 30);
+    setPersonalLogsLoading(false);
+    if (res.success && Array.isArray(res.data)) {
+      setPersonalLogs(res.data);
+    } else {
+      setPersonalLogsError(res.message || "Could not load account activity logs.");
+    }
+  };
+
+  useEffect(() => {
+    if (activeSessionUser?.userId) {
+      loadPersonalLogsForAccount(activeSessionUser);
+    } else {
+      setPersonalLogs([]);
+    }
+  }, [activeSessionUser?.userId]);
+
+  const handleMobileSignIn = async () => {
+    if (!loginEmail.trim() || !loginPassword) {
+      setLoginError("Please enter your email and password.");
+      return;
+    }
+    setLoginLoading(true);
+    setLoginError(null);
+    const res = await loginMobileAccount(loginEmail, loginPassword);
+    setLoginLoading(false);
+
+    if (!res.success || !res.user) {
+      setLoginError(res.message || "Invalid email or password.");
+      return;
+    }
+
+    const signedUser = res.user;
+    const merged = [
+      signedUser,
+      ...signedInAccounts.filter((a) => a.email.toLowerCase() !== signedUser.email.toLowerCase()),
+    ];
+    setSignedInAccounts(merged);
+    setActiveAccountEmail(signedUser.email);
+    await persistMobileSessions(merged, signedUser.email);
+    setShowAccountLoginModal(false);
+    setShowAccountSwitcherModal(false);
+    setLoginEmail("");
+    setLoginPassword("");
+  };
+
+  const handleSwitchAccount = async (email: string) => {
+    setActiveAccountEmail(email);
+    setPendingChallenge(null);
+    await persistMobileSessions(signedInAccounts, email);
+    setShowAccountSwitcherModal(false);
+  };
+
+  const handleSignOutActive = async () => {
+    if (!activeSessionUser) return;
+    const remaining = signedInAccounts.filter(
+      (a) => a.email.toLowerCase() !== activeSessionUser.email.toLowerCase()
+    );
+    const nextEmail = remaining[0]?.email || null;
+    setSignedInAccounts(remaining);
+    setActiveAccountEmail(nextEmail);
+    setPendingChallenge(null);
+    await persistMobileSessions(remaining, nextEmail);
+    setShowAccountSwitcherModal(false);
+  };
 
   // Bind this physical device to enrolled Sentinel accounts with proof of possession
   useEffect(() => {
@@ -400,12 +540,9 @@ export default function AuthenticatorScreen() {
       }
 
       const emailsToCheck = new Set<string>();
-      accounts.forEach((acc) => {
-        if (acc.status === "REVOKED" || acc.status === "UNLINKED") return;
-        if (acc.name && acc.name.includes("@")) {
-          emailsToCheck.add(acc.name.trim().toLowerCase());
-        }
-      });
+      if (activeSessionUser?.email) {
+        emailsToCheck.add(activeSessionUser.email.trim().toLowerCase());
+      }
 
       if (emailsToCheck.size === 0) return;
 
@@ -451,8 +588,9 @@ export default function AuthenticatorScreen() {
               setIsChallengeMinimized(false);
               const opts = buildChallengeOptions(String(ch.matchCode || "42"));
 
-              // Schedule native Android system notification banner safely
+              // Schedule native Android system notification banner safely with sound + vibration
               try {
+                Vibration.vibrate([0, 250, 150, 250]);
                 Notifications.scheduleNotificationAsync({
                   content: {
                     title: "Sentinel Security Sign-In Request",
@@ -465,7 +603,7 @@ export default function AuthenticatorScreen() {
                     },
                     sound: "default",
                   },
-                  trigger: null,
+                  trigger: Platform.OS === "android" ? { channelId: "mfa-alerts" } : null,
                 }).catch(() => {});
               } catch {
                 // Ignore notification trigger notice
@@ -1066,9 +1204,9 @@ export default function AuthenticatorScreen() {
   const progressPercent = Math.max(0, Math.min(100, (remainingSeconds / 30) * 100));
 
   const renderPasscodesTab = () => (
-    accounts.length > 0 ? (
+    visibleAccounts.length > 0 ? (
       <FlatList
-        data={accounts}
+        data={visibleAccounts}
         keyExtractor={(item, index) => item.id || `${item.name}-${item.secret}-${index}`}
         contentContainerStyle={styles.listContentWithDock}
         showsVerticalScrollIndicator={false}
@@ -1438,6 +1576,100 @@ export default function AuthenticatorScreen() {
             </Text>
           </TouchableOpacity>
         </View>
+
+        <View style={styles.policyDivider} />
+
+        <View style={styles.pinConfigRow}>
+          <View style={styles.switchInfo}>
+            <Text style={styles.switchTitle}>Push Alert &amp; Sound Channel</Text>
+            <Text style={styles.switchDesc}>
+              {notificationPermissionGranted
+                ? "Notifications enabled on mfa-alerts channel with default sound."
+                : "Tap Test Alert to grant permission and verify notification sound."}
+            </Text>
+          </View>
+          <TouchableOpacity
+            style={styles.pinChangeButton}
+            onPress={async () => {
+              try {
+                const perm = await Notifications.getPermissionsAsync();
+                let allowed = perm.status === "granted";
+                if (!allowed) {
+                  const req = await Notifications.requestPermissionsAsync();
+                  allowed = req.status === "granted";
+                }
+                setNotificationPermissionGranted(allowed);
+                if (!allowed) {
+                  Alert.alert("Permission Required", "Please allow notifications in device settings to hear MFA challenge alerts.");
+                  return;
+                }
+                Vibration.vibrate([0, 250, 150, 250]);
+                await Notifications.scheduleNotificationAsync({
+                  content: {
+                    title: "Sentinel Alert Sound Test",
+                    body: "Notifications and sound are active on mfa-alerts.",
+                    sound: "default",
+                  },
+                  trigger: Platform.OS === "android" ? { channelId: "mfa-alerts" } : null,
+                });
+              } catch {
+                Alert.alert("Notification Test", "Unable to trigger test notification on this device.");
+              }
+            }}
+          >
+            <Text style={styles.pinChangeButtonText}>TEST ALERT</Text>
+          </TouchableOpacity>
+        </View>
+      </View>
+
+      {/* Per-Account Server Activity Logs (Password changes, Logins, Device & IP) */}
+      <View style={styles.securitySectionCard}>
+        <View style={styles.auditHeaderRow}>
+          <Text style={styles.securitySectionTitle}>ACCOUNT ACTIVITY LOGS</Text>
+          <TouchableOpacity
+            style={styles.pinChangeButton}
+            onPress={() => loadPersonalLogsForAccount(activeSessionUser)}
+          >
+            <Text style={styles.pinChangeButtonText}>
+              {personalLogsLoading ? "LOADING..." : "REFRESH"}
+            </Text>
+          </TouchableOpacity>
+        </View>
+        <Text style={styles.securitySectionSubtitle}>
+          {activeSessionUser
+            ? `Server activity for ${activeSessionUser.email} — logins, password changes, device info, and IP addresses.`
+            : "Sign in to view your account activity logs."}
+        </Text>
+
+        {personalLogsError && (
+          <Text style={{ color: "#fb7185", fontSize: 11, marginBottom: 8 }}>{personalLogsError}</Text>
+        )}
+
+        {personalLogs.length > 0 ? (
+          <View style={styles.auditList}>
+            {personalLogs.slice(0, 20).map((log) => (
+              <View key={log.id} style={styles.auditItem}>
+                <View style={styles.auditTopRow}>
+                  <View style={styles.auditTypeBadge}>
+                    <Text style={styles.auditTypeBadgeText}>{log.actionType}</Text>
+                  </View>
+                  <Text style={styles.auditTimeText}>{log.createdAt}</Text>
+                </View>
+                <Text style={styles.auditItemDetails}>{log.details || log.actionType}</Text>
+                <Text style={styles.auditItemOrigin}>
+                  IP: {log.ipAddress || "N/A"} | Target: {log.targetResource || "N/A"}
+                </Text>
+                <Text style={styles.auditItemAccount}>
+                  Device: {log.userAgent || "Unknown device"}
+                </Text>
+              </View>
+            ))}
+          </View>
+        ) : (
+          <Text style={styles.emptyAuditText}>
+            {personalLogsLoading ? "Loading account activity..." : "No server activity records found for this account."}
+          </Text>
+        )}
       </View>
 
       {/* Security Audit & Login Logs (Immutable Local Trail) */}
@@ -1687,6 +1919,15 @@ export default function AuthenticatorScreen() {
             <Text style={styles.headerTitle}>Authenticator</Text>
           </View>
 
+          <TouchableOpacity
+            style={[styles.quickLockIconBtn, { marginRight: 6 }]}
+            onPress={() => setShowAccountSwitcherModal(true)}
+          >
+            <Text style={styles.quickLockIconText}>
+              {activeSessionUser ? activeSessionUser.email.split("@")[0].toUpperCase().slice(0, 10) : "SIGN IN"}
+            </Text>
+          </TouchableOpacity>
+
           {requireBiometrics && hasBiometricHardware && (
             <TouchableOpacity style={styles.quickLockIconBtn} onPress={handleLockApp}>
               <Text style={styles.quickLockIconText}>LOCK</Text>
@@ -1857,31 +2098,30 @@ export default function AuthenticatorScreen() {
               </View>
 
               <Text style={styles.pushPromptText}>
-                Select the number displayed on your browser screen to approve access (biometrics required):
+                Approve this sign-in request? (Biometrics required to confirm YES)
               </Text>
 
               <View style={styles.numberOptionsRow}>
-                {pendingChallenge.options.map((opt) => (
-                  <TouchableOpacity
-                    key={opt}
-                    disabled={respondingChallenge}
-                    style={styles.numberOptionButton}
-                    onPress={() => handleRespondChallenge("APPROVE", opt)}
-                  >
-                    <Text style={styles.numberOptionText}>{opt}</Text>
-                  </TouchableOpacity>
-                ))}
-              </View>
+                <TouchableOpacity
+                  disabled={respondingChallenge}
+                  style={[styles.numberOptionButton, { flex: 1, backgroundColor: "rgba(16, 185, 129, 0.16)", borderColor: "#10b981" }]}
+                  onPress={() => handleRespondChallenge("APPROVE", "YES")}
+                >
+                  <Text style={[styles.numberOptionText, { fontSize: 15, color: "#34d399" }]}>
+                    {respondingChallenge ? "..." : "YES, APPROVE"}
+                  </Text>
+                </TouchableOpacity>
 
-              <TouchableOpacity
-                disabled={respondingChallenge}
-                style={styles.denyButton}
-                onPress={() => handleRespondChallenge("DENY")}
-              >
-                <Text style={styles.denyButtonText}>
-                  {respondingChallenge ? "PROCESSING..." : "DENY REQUEST"}
-                </Text>
-              </TouchableOpacity>
+                <TouchableOpacity
+                  disabled={respondingChallenge}
+                  style={[styles.numberOptionButton, { flex: 1, backgroundColor: "rgba(244, 63, 94, 0.16)", borderColor: "#f43f5e" }]}
+                  onPress={() => handleRespondChallenge("DENY")}
+                >
+                  <Text style={[styles.numberOptionText, { fontSize: 15, color: "#fb7185" }]}>
+                    {respondingChallenge ? "..." : "NO, DENY"}
+                  </Text>
+                </TouchableOpacity>
+              </View>
             </View>
           </View>
         </Modal>
@@ -1992,6 +2232,166 @@ export default function AuthenticatorScreen() {
                     </View>
                   ))}
                 </ScrollView>
+              )}
+            </View>
+          </View>
+        </Modal>
+      )}
+
+      {/* Account Switcher & Easy Add Account Modal */}
+      {showAccountSwitcherModal && (
+        <Modal
+          visible={true}
+          animationType="fade"
+          transparent={true}
+          onRequestClose={() => setShowAccountSwitcherModal(false)}
+        >
+          <View style={styles.pushModalOverlay}>
+            <View style={styles.pushModalCard}>
+              <View style={styles.pushHeaderRow}>
+                <View style={styles.pushStatusDot} />
+                <Text style={styles.pushModalTitle}>ACCOUNT SWITCHER</Text>
+              </View>
+              <Text style={styles.pushPromptText}>
+                Switch active Sentinel account or sign in another account on this device.
+              </Text>
+
+              <ScrollView style={{ maxHeight: 240, marginBottom: 14 }}>
+                {signedInAccounts.map((acc) => {
+                  const isActive = activeSessionUser?.email.toLowerCase() === acc.email.toLowerCase();
+                  return (
+                    <TouchableOpacity
+                      key={acc.email}
+                      onPress={() => handleSwitchAccount(acc.email)}
+                      style={{
+                        padding: 12,
+                        borderRadius: 10,
+                        borderWidth: 1,
+                        borderColor: isActive ? "#54f4fc" : "rgba(255,255,255,0.12)",
+                        backgroundColor: isActive ? "rgba(84,244,252,0.1)" : "#0b1322",
+                        marginBottom: 8,
+                        flexDirection: "row",
+                        alignItems: "center",
+                        justifyContent: "space-between",
+                      }}
+                    >
+                      <View style={{ flex: 1, paddingRight: 8 }}>
+                        <Text style={{ color: "#ffffff", fontWeight: "700", fontSize: 13 }}>
+                          {acc.fullName || acc.email}
+                        </Text>
+                        <Text style={{ color: "#94a3b8", fontSize: 11 }}>{acc.email}</Text>
+                      </View>
+                      <Text style={{ color: isActive ? "#54f4fc" : "#64748b", fontSize: 10, fontWeight: "800" }}>
+                        {isActive ? "ACTIVE" : "SWITCH"}
+                      </Text>
+                    </TouchableOpacity>
+                  );
+                })}
+              </ScrollView>
+
+              <TouchableOpacity
+                style={[styles.primaryUnlockButton, { marginBottom: 8 }]}
+                onPress={() => {
+                  setShowAccountSwitcherModal(false);
+                  setLoginError(null);
+                  setShowAccountLoginModal(true);
+                }}
+              >
+                <Text style={styles.primaryUnlockButtonText}>+ ADD ACCOUNT</Text>
+              </TouchableOpacity>
+
+              {activeSessionUser && (
+                <TouchableOpacity
+                  style={[styles.denyButton, { marginBottom: 8 }]}
+                  onPress={handleSignOutActive}
+                >
+                  <Text style={styles.denyButtonText}>SIGN OUT ({activeSessionUser.email})</Text>
+                </TouchableOpacity>
+              )}
+
+              <TouchableOpacity
+                style={styles.portalHelperButton}
+                onPress={() => setShowAccountSwitcherModal(false)}
+              >
+                <Text style={styles.portalHelperButtonText}>CLOSE</Text>
+              </TouchableOpacity>
+            </View>
+          </View>
+        </Modal>
+      )}
+
+      {/* Per-Account Mobile Sign-In Gate / Easy Add Account Modal */}
+      {isStartupComplete && (!activeSessionUser || showAccountLoginModal) && (
+        <Modal
+          visible={true}
+          animationType="fade"
+          transparent={true}
+          onRequestClose={() => {
+            if (activeSessionUser) setShowAccountLoginModal(false);
+          }}
+        >
+          <View style={styles.pushModalOverlay}>
+            <View style={styles.pushModalCard}>
+              <View style={styles.pushHeaderRow}>
+                <View style={styles.pushStatusDot} />
+                <Text style={styles.pushModalTitle}>
+                  {activeSessionUser ? "ADD SENTINEL ACCOUNT" : "SIGN IN TO SENTINEL"}
+                </Text>
+              </View>
+              <Text style={styles.pushPromptText}>
+                Sign in with your Sentinel Web account. New users must register on the Web Portal first.
+              </Text>
+
+              {loginError && (
+                <View style={styles.pinErrorBanner}>
+                  <Text style={styles.pinErrorBannerText}>{loginError}</Text>
+                </View>
+              )}
+
+              <TextInput
+                style={[styles.pinInputField, { marginBottom: 10, textAlign: "left" }]}
+                placeholder="Email address"
+                placeholderTextColor="#64748b"
+                autoCapitalize="none"
+                keyboardType="email-address"
+                value={loginEmail}
+                onChangeText={setLoginEmail}
+              />
+
+              <TextInput
+                style={[styles.pinInputField, { marginBottom: 14, textAlign: "left" }]}
+                placeholder="Password"
+                placeholderTextColor="#64748b"
+                secureTextEntry={true}
+                value={loginPassword}
+                onChangeText={setLoginPassword}
+                onSubmitEditing={handleMobileSignIn}
+              />
+
+              <TouchableOpacity
+                disabled={loginLoading}
+                style={[styles.primaryUnlockButton, { marginBottom: 8 }]}
+                onPress={handleMobileSignIn}
+              >
+                <Text style={styles.primaryUnlockButtonText}>
+                  {loginLoading ? "SIGNING IN..." : "SIGN IN"}
+                </Text>
+              </TouchableOpacity>
+
+              <TouchableOpacity
+                style={[styles.portalHelperButton, { marginBottom: 8 }]}
+                onPress={() => Linking.openURL(`${WEB_PORTAL_URL}/register`)}
+              >
+                <Text style={styles.portalHelperButtonText}>REGISTER ON WEB PORTAL</Text>
+              </TouchableOpacity>
+
+              {activeSessionUser && (
+                <TouchableOpacity
+                  style={styles.portalHelperButton}
+                  onPress={() => setShowAccountLoginModal(false)}
+                >
+                  <Text style={styles.portalHelperButtonText}>CANCEL</Text>
+                </TouchableOpacity>
               )}
             </View>
           </View>
