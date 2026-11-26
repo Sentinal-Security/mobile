@@ -1,5 +1,5 @@
 import React, { useState } from "react";
-import { Text, TouchableOpacity, View } from "react-native";
+import { Image, ImageSourcePropType, Text, TouchableOpacity, View } from "react-native";
 
 export type CaptchaTileKind =
   | "traffic_light"
@@ -100,6 +100,16 @@ const CHALLENGE_POOL: ImageChallenge[] = [
   },
 ];
 
+const TILE_IMAGES: Record<CaptchaTileKind, ImageSourcePropType> = {
+  traffic_light: require("../../assets/captcha/traffic_light.jpg"),
+  bicycle: require("../../assets/captcha/bicycle.jpg"),
+  bus: require("../../assets/captcha/bus.jpg"),
+  car: require("../../assets/captcha/car.jpg"),
+  crosswalk: require("../../assets/captcha/crosswalk.jpg"),
+  tree: require("../../assets/captcha/tree.jpg"),
+  building: require("../../assets/captcha/building.jpg"),
+};
+
 interface ThemeColorsLike {
   bgElevated: string;
   bgInput: string;
@@ -122,174 +132,6 @@ interface ImageCaptchaProps {
   themeColors: ThemeColorsLike;
 }
 
-function TileGlyph({ kind }: { kind: CaptchaTileKind }) {
-  switch (kind) {
-    case "traffic_light":
-      return (
-        <View style={{ alignItems: "center" }}>
-          <View
-            style={{
-              width: 16,
-              height: 30,
-              borderRadius: 4,
-              backgroundColor: "#1e293b",
-              borderWidth: 1,
-              borderColor: "#64748b",
-              alignItems: "center",
-              justifyContent: "space-evenly",
-              paddingVertical: 2,
-            }}
-          >
-            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: "#ef4444" }} />
-            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: "#f59e0b" }} />
-            <View style={{ width: 6, height: 6, borderRadius: 3, backgroundColor: "#22c55e" }} />
-          </View>
-          <View style={{ width: 3, height: 6, backgroundColor: "#64748b" }} />
-        </View>
-      );
-    case "bicycle":
-      return (
-        <View style={{ width: 36, height: 24, justifyContent: "flex-end", alignItems: "center" }}>
-          <View
-            style={{
-              position: "absolute",
-              top: 4,
-              width: 16,
-              height: 8,
-              borderTopWidth: 2,
-              borderLeftWidth: 2,
-              borderRightWidth: 2,
-              borderColor: "#cbd5e1",
-            }}
-          />
-          <View style={{ flexDirection: "row", justifyContent: "space-between", width: 34 }}>
-            <View style={{ width: 12, height: 12, borderRadius: 6, borderWidth: 2.5, borderColor: "#38bdf8" }} />
-            <View style={{ width: 12, height: 12, borderRadius: 6, borderWidth: 2.5, borderColor: "#38bdf8" }} />
-          </View>
-        </View>
-      );
-    case "bus":
-      return (
-        <View style={{ alignItems: "center" }}>
-          <View
-            style={{
-              width: 28,
-              height: 26,
-              borderRadius: 4,
-              backgroundColor: "#0284c7",
-              borderWidth: 1.5,
-              borderColor: "#7dd3fc",
-              alignItems: "center",
-              justifyContent: "space-between",
-              paddingVertical: 3,
-            }}
-          >
-            <View style={{ width: 20, height: 9, borderRadius: 2, backgroundColor: "#e0f2fe" }} />
-            <View style={{ flexDirection: "row", justifyContent: "space-between", width: 20 }}>
-              <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: "#fef08a" }} />
-              <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: "#fef08a" }} />
-            </View>
-          </View>
-          <View style={{ flexDirection: "row", justifyContent: "space-between", width: 20 }}>
-            <View style={{ width: 5, height: 3, backgroundColor: "#334155" }} />
-            <View style={{ width: 5, height: 3, backgroundColor: "#334155" }} />
-          </View>
-        </View>
-      );
-    case "car":
-      return (
-        <View style={{ alignItems: "center" }}>
-          <View
-            style={{
-              width: 20,
-              height: 8,
-              borderTopLeftRadius: 4,
-              borderTopRightRadius: 4,
-              backgroundColor: "#475569",
-              borderWidth: 1,
-              borderColor: "#94a3b8",
-            }}
-          />
-          <View
-            style={{
-              width: 34,
-              height: 11,
-              borderRadius: 3,
-              backgroundColor: "#6366f1",
-              borderWidth: 1,
-              borderColor: "#a5b4fc",
-              flexDirection: "row",
-              justifyContent: "space-between",
-              alignItems: "center",
-              paddingHorizontal: 3,
-            }}
-          >
-            <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: "#fef08a" }} />
-            <View style={{ width: 4, height: 4, borderRadius: 2, backgroundColor: "#fef08a" }} />
-          </View>
-          <View style={{ flexDirection: "row", justifyContent: "space-between", width: 24, marginTop: -2 }}>
-            <View style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: "#0f172a", borderWidth: 1.5, borderColor: "#cbd5e1" }} />
-            <View style={{ width: 7, height: 7, borderRadius: 3.5, backgroundColor: "#0f172a", borderWidth: 1.5, borderColor: "#cbd5e1" }} />
-          </View>
-        </View>
-      );
-    case "crosswalk":
-      return (
-        <View
-          style={{
-            width: 34,
-            height: 22,
-            borderRadius: 3,
-            backgroundColor: "#1e293b",
-            borderWidth: 1,
-            borderColor: "#475569",
-            flexDirection: "row",
-            justifyContent: "space-evenly",
-            alignItems: "center",
-            paddingHorizontal: 2,
-          }}
-        >
-          <View style={{ width: 5, height: 14, backgroundColor: "#f8fafc", borderRadius: 1 }} />
-          <View style={{ width: 5, height: 14, backgroundColor: "#f8fafc", borderRadius: 1 }} />
-          <View style={{ width: 5, height: 14, backgroundColor: "#f8fafc", borderRadius: 1 }} />
-          <View style={{ width: 5, height: 14, backgroundColor: "#f8fafc", borderRadius: 1 }} />
-        </View>
-      );
-    case "tree":
-      return (
-        <View style={{ alignItems: "center" }}>
-          <View style={{ width: 20, height: 20, borderRadius: 10, backgroundColor: "#15803d", borderWidth: 1.5, borderColor: "#4ade80" }} />
-          <View style={{ width: 5, height: 9, backgroundColor: "#92400e", marginTop: -2 }} />
-        </View>
-      );
-    case "building":
-      return (
-        <View
-          style={{
-            width: 24,
-            height: 30,
-            borderRadius: 2,
-            backgroundColor: "#334155",
-            borderWidth: 1,
-            borderColor: "#64748b",
-            padding: 4,
-            justifyContent: "space-between",
-          }}
-        >
-          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-            <View style={{ width: 5, height: 5, backgroundColor: "#94a3b8" }} />
-            <View style={{ width: 5, height: 5, backgroundColor: "#94a3b8" }} />
-          </View>
-          <View style={{ flexDirection: "row", justifyContent: "space-between" }}>
-            <View style={{ width: 5, height: 5, backgroundColor: "#94a3b8" }} />
-            <View style={{ width: 5, height: 5, backgroundColor: "#94a3b8" }} />
-          </View>
-          <View style={{ width: 6, height: 7, backgroundColor: "#0f172a", alignSelf: "center" }} />
-        </View>
-      );
-  }
-}
-
 export const IMAGE_CAPTCHA_POOL_LENGTH = CHALLENGE_POOL.length;
 
 export function ImageCaptcha({
@@ -305,12 +147,27 @@ export function ImageCaptcha({
   const safeIndex = ((challengeIndex % CHALLENGE_POOL.length) + CHALLENGE_POOL.length) % CHALLENGE_POOL.length;
   const challenge = CHALLENGE_POOL[safeIndex];
 
+  const isExactMatch = (indices: number[]) => {
+    const expected = challenge.tiles
+      .map((tile, idx) => (tile === challenge.target ? idx : -1))
+      .filter((idx) => idx !== -1);
+    const sorted = [...indices].sort((a, b) => a - b);
+    return (
+      expected.length === sorted.length &&
+      expected.every((val, i) => val === sorted[i])
+    );
+  };
+
   const toggleTile = (idx: number) => {
     if (verified) return;
     setErrorMsg(null);
-    setSelectedIndices((prev) =>
-      prev.includes(idx) ? prev.filter((item) => item !== idx) : [...prev, idx]
-    );
+    const next = selectedIndices.includes(idx)
+      ? selectedIndices.filter((item) => item !== idx)
+      : [...selectedIndices, idx];
+    setSelectedIndices(next);
+    if (isExactMatch(next)) {
+      onVerifyChange(true);
+    }
   };
 
   const handleCycle = () => {
@@ -321,16 +178,7 @@ export function ImageCaptcha({
   };
 
   const handleVerify = () => {
-    const expected = challenge.tiles
-      .map((tile, idx) => (tile === challenge.target ? idx : -1))
-      .filter((idx) => idx !== -1);
-    const sorted = [...selectedIndices].sort((a, b) => a - b);
-
-    const isMatch =
-      expected.length === sorted.length &&
-      expected.every((val, i) => val === sorted[i]);
-
-    if (isMatch) {
+    if (isExactMatch(selectedIndices)) {
       setErrorMsg(null);
       onVerifyChange(true);
     } else {
@@ -389,30 +237,37 @@ export function ImageCaptcha({
                   onPress={() => toggleTile(idx)}
                   style={{
                     width: "31.5%",
-                    height: 54,
+                    height: 68,
                     borderRadius: 8,
                     borderWidth: isSelected ? 2 : 1,
                     borderColor: isSelected ? themeColors.accent : themeColors.borderSubtle,
-                    backgroundColor: isSelected ? themeColors.accentSoft : themeColors.bgInput,
-                    alignItems: "center",
-                    justifyContent: "center",
+                    backgroundColor: themeColors.bgInput,
+                    overflow: "hidden",
                     marginBottom: 4,
                   }}
                 >
-                  <TileGlyph kind={tile} />
+                  <Image
+                    source={TILE_IMAGES[tile]}
+                    style={{
+                      width: "100%",
+                      height: "100%",
+                      opacity: isSelected ? 0.78 : 1,
+                    }}
+                    resizeMode="cover"
+                  />
                   {isSelected && (
                     <View
                       style={{
                         position: "absolute",
-                        top: 3,
+                        top: 4,
                         right: 4,
-                        paddingHorizontal: 4,
+                        paddingHorizontal: 5,
                         paddingVertical: 1,
                         borderRadius: 4,
                         backgroundColor: themeColors.accent,
                       }}
                     >
-                      <Text style={{ fontSize: 8, fontWeight: "800", color: "#020617" }}>OK</Text>
+                      <Text style={{ fontSize: 9, fontWeight: "800", color: "#020617" }}>OK</Text>
                     </View>
                   )}
                 </TouchableOpacity>
