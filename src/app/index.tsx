@@ -720,13 +720,6 @@ export default function AuthenticatorScreen() {
   };
 
   const handleUnlockWithPin = async () => {
-    const now = Date.now();
-    if (pinLockoutUntil > now) {
-      const secs = Math.ceil((pinLockoutUntil - now) / 1000);
-      setPinErrorMessage(`Too many failed attempts. Try again in ${secs}s.`);
-      return;
-    }
-
     const cleanPin = enteredPin.trim();
     if (!masterPin) {
       setIsVaultUnlocked(true);
@@ -749,16 +742,8 @@ export default function AuthenticatorScreen() {
       });
       setAuditLogs((prev) => [newLog, ...prev]);
     } else {
-      const nextLock = await recordPinFailure();
       setEnteredPin("");
-      if (nextLock.lockoutUntil > Date.now()) {
-        setPinLockoutUntil(nextLock.lockoutUntil);
-        const secs = Math.ceil((nextLock.lockoutUntil - Date.now()) / 1000);
-        setPinErrorMessage(`Too many failed attempts. Locked for ${secs}s.`);
-      } else {
-        const remaining = 5 - (nextLock.failedAttempts % 5);
-        setPinErrorMessage(`Incorrect PIN. ${remaining} attempt${remaining === 1 ? "" : "s"} before temporary lockout.`);
-      }
+      setPinErrorMessage("Incorrect PIN. Please try again.");
     }
   };
 
